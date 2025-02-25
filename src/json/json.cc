@@ -289,11 +289,11 @@ STATIC JsonUtilCode parseAndValidateMSetCmdArgs(ValkeyModuleCtx *ctx, ValkeyModu
     JsonUtilCode rc;
 
     // Allocate memory for args_list using a unique_ptr
-    std::unique_ptr<MSetCmdArgs> args_list((MSetCmdArgs*)ValkeyModule_Alloc(num_keys * sizeof(MSetCmdArgs)));
+    std::unique_ptr<MSetCmdArgs[]> args_list(new (std::nothrow) MSetCmdArgs[num_keys]);
 
     // Parse and validate arguments for each key
     for (size_t i = 0; i < num_keys; ++i) {
-        MSetCmdArgs &current_arg = args_list.get()[i];
+        MSetCmdArgs &current_arg = args_list[i];
 
         current_arg.key_str = argv[i * 3 + 1];
         current_arg.key = static_cast<ValkeyModuleKey*>(
@@ -340,7 +340,6 @@ STATIC JsonUtilCode parseAndValidateMSetCmdArgs(ValkeyModuleCtx *ctx, ValkeyModu
             if (doc == nullptr) {
                 return JSONUTIL_DOCUMENT_KEY_NOT_FOUND;
             }
-
             rc = dom_verify_value(ctx, doc, current_arg.path, current_arg.json);
             if (rc != JSONUTIL_SUCCESS) {
                 return rc;
@@ -776,9 +775,10 @@ int Command_JsonMSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
 
     // replicate the entire command
     ValkeyModule_ReplicateVerbatim(ctx);
+
+    delete[] args.args_list;  // Free memory
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
-
 
 int Command_JsonGet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);

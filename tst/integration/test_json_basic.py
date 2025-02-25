@@ -378,6 +378,14 @@ class TestJsonBasic(JsonTestCase):
                     'JSON.SET', k1, '.' '"value"', 'badword')
             assert self.error_class.is_syntax_error(str(e.value))
 
+    def test_json_mset_command_with_error_conditions(self):
+        client = self.server.get_new_client()
+        # A new Valkey key's path must be root
+        with pytest.raises(ResponseError) as e:
+            assert None == client.execute_command(
+                'JSON.MSET', foo, '.bar', '"bar"')
+        assert self.error_class.is_syntax_error(str(e.value))
+
     def test_json_set_command_with_error_conditions(self):
         client = self.server.get_new_client()
         # A new Valkey key's path must be root
