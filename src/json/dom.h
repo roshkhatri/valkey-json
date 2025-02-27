@@ -211,8 +211,16 @@ JsonUtilCode dom_parse(ValkeyModuleCtx *ctx, const char *json_buf, const size_t 
 /* Free a document object */
 void dom_free_doc(JDocument *doc);
 
-/* Get document size */
+/**
+ * Get document size with the optimization of returning the meta data.
+ */
 size_t dom_get_doc_size(const JDocument *doc);
+
+/**
+ * Get document size without optimization.
+ * Calculate the size by walking through the JSON tree.
+ */
+size_t dom_get_doc_size_no_opt(const JDocument *doc);
 
 /* Set document size */
 void dom_set_doc_size(JDocument *doc, const size_t size);
@@ -244,6 +252,20 @@ void dom_serialize_value(const JValue &val, const PrintFormat *format, rapidjson
  * Get the root value of the document.
  */
 JValue& dom_get_value(JDocument &doc);
+
+/* Verify value at the path.
+ * @param json_path: path that is compliant to the JSON Path syntax.
+ * @param is_create_only - indicates to create a new value.
+ * @param is_update_only - indicates to update an existing value.
+ * @return JSONUTIL_SUCCESS for success, other code for failure.
+ */
+JsonUtilCode dom_verify_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *json_path, const char *new_val_json, 
+                            size_t new_val_len);
+
+
+inline JsonUtilCode dom_verify_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *json_path, const char *new_val_json) {
+    return dom_verify_value(ctx, doc, json_path, new_val_json, strlen(new_val_json));
+}
 
 /* Set value at the path.
  * @param json_path: path that is compliant to the JSON Path syntax.

@@ -38,7 +38,7 @@
 #include <memory>
 #include <cmath>
 
-#define MODULE_VERSION 10201
+#define MODULE_VERSION 90
 #define MODULE_NAME "json"
 #define DOCUMENT_TYPE_NAME "ReJSON-RL"
 #define DOCUMENT_TYPE_ENCODING_VERSION 3   /* Currently support 1 or 3 */
@@ -102,10 +102,14 @@ size_t json_get_max_query_string_size() {
 }
 
 #define CHECK_DOCUMENT_SIZE_LIMIT(ctx, new_doc_size) \
-if (!(ValkeyModule_GetContextFlags(ctx) & VALKEYMODULE_CTX_FLAGS_REPLICATED) && \
+if (ctx != nullptr && !(ValkeyModule_GetContextFlags(ctx) & VALKEYMODULE_CTX_FLAGS_REPLICATED) && \
     json_get_max_document_size() > 0 && (new_doc_size > json_get_max_document_size())) { \
     return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(JSONUTIL_DOCUMENT_SIZE_LIMIT_EXCEEDED)); \
 }
+
+#define END_TRACKING_MEMORY(ctx, cmd, doc, orig_doc_size, begin_val) \
+int64_t delta = jsonstats_end_track_mem(begin_val); \
+dom_set_doc_size(doc, orig_doc_size + delta);
 
 // module config params
 // NOTE: We save a copy of the value for each config param instead of pointer address, because the compiler does
@@ -258,6 +262,107 @@ STATIC JsonUtilCode parseSetCmdArgs(ValkeyModuleString **argv, const int argc, S
     return JSONUTIL_SUCCESS;
 }
 
+typedef struct {
+    ValkeyModuleString *key_str;    // Required
+    ValkeyModuleKey *key;
+    const char *path;               // Required
+    const char *json;               // Required
+    size_t json_len;
+    bool is_root_path;
+} MSetCmdArgs;
+
+STATIC JsonUtilCode parseAndValidateMSetCmdArgs(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, const int argc, MSetCmdArgs **args_list, size_t *num_keys) {
+    // Validate that the number of arguments is correct for MSET (3 arguments per key)
+    if ((argc - 1) % 3 != 0) {
+        return JSONUTIL_WRONG_NUM_ARGS;
+    }
+
+    *num_keys = (argc - 1) / 3;
+    // Allocate memory for args_list 
+    *args_list = reinterpret_cast<MSetCmdArgs *>(ValkeyModule_Alloc((*num_keys) * sizeof(MSetCmdArgs)));
+    if (!(*args_list)) {
+        return JSONUTIL_WRONG_NUM_ARGS; //JSONUTIL_ALLOCATION_FAILURE
+    }
+
+    JsonUtilCode rc;
+    // Parse and validate arguments for each key
+    size_t i;
+    for (i = 0; i < *num_keys; ++i) {
+        MSetCmdArgs &current_arg = (*args_list)[i];
+
+        current_arg.key_str = argv[i * 3 + 1];
+        current_arg.key = static_cast<ValkeyModuleKey*>(
+            ValkeyModule_OpenKey(ctx, current_arg.key_str, VALKEYMODULE_READ | VALKEYMODULE_WRITE));
+
+        // Handle key allocation failure
+        if (!current_arg.key) {
+            rc = JSONUTIL_WRONG_NUM_ARGS; // JSONUTIL_KEY_OPEN_ERROR
+            goto cleanup;
+        }
+
+        current_arg.path = ValkeyModule_StringPtrLen(argv[i * 3 + 2], nullptr);
+        current_arg.json = ValkeyModule_StringPtrLen(argv[i * 3 + 3], &current_arg.json_len);
+
+        // Validate key type
+        int type = ValkeyModule_KeyType(current_arg.key);
+        if (type != VALKEYMODULE_KEYTYPE_EMPTY &&
+            ValkeyModule_ModuleTypeGetType(current_arg.key) != DocumentType) {
+            rc = JSONUTIL_NOT_A_DOCUMENT_KEY;
+            goto cleanup;
+        }
+
+        // Root path validation
+        bool is_new_valkey_key = (type == VALKEYMODULE_KEYTYPE_EMPTY);
+        current_arg.is_root_path = jsonutil_is_root_path(current_arg.path);
+        if (is_new_valkey_key && !current_arg.is_root_path) {
+            rc = JSONUTIL_COMMAND_SYNTAX_ERROR;
+            goto cleanup;
+        }
+
+        // Validate JSON structure
+        if (current_arg.is_root_path) {
+            JDocument *doc = nullptr;
+            rc = dom_parse(ctx, current_arg.json, current_arg.json_len, &doc);
+            if (rc != JSONUTIL_SUCCESS) {
+                if (doc) dom_free_doc(doc);
+                goto cleanup;
+            }
+            if (json_is_instrument_enabled_insert() || json_is_instrument_enabled_update()) {
+                size_t len;
+                const char* key_cstr = ValkeyModule_StringPtrLen(current_arg.key_str, &len);
+                std::size_t key_hash = std::hash<std::string_view>{}(std::string_view(key_cstr, len));
+                ValkeyModule_Log(ctx, "warning",
+                                "Dump document structure before setting JSON key (hashed) %zu whole doc %p:",
+                                key_hash, static_cast<void*>(doc));
+                DumpRedactedJValue(doc->GetJValue(), nullptr, "warning");
+            }
+            dom_free_doc(doc);
+        } else {
+            JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(current_arg.key));
+            if (!doc) {
+                rc = JSONUTIL_DOCUMENT_KEY_NOT_FOUND;
+                goto cleanup;
+            }
+            rc = dom_verify_value(ctx, doc, current_arg.path, current_arg.json);
+            if (rc != JSONUTIL_SUCCESS) {
+                goto cleanup;
+            }
+        }
+    }
+    return JSONUTIL_SUCCESS;
+
+cleanup:
+    // Free allocated memory and close opened keys
+    for (size_t j = 0; j <= i; ++j) {
+        if ((*args_list)[j].key) {
+            ValkeyModule_CloseKey((*args_list)[j].key);
+        }
+    }
+    ValkeyModule_Free(*args_list);
+    *args_list = nullptr;
+    return rc;
+}
+
 STATIC JsonUtilCode parseGetCmdArgs(ValkeyModuleString **argv, const int argc, ValkeyModuleString **key,
                                     PrintFormat *format, ValkeyModuleString ***paths, int *num_paths) {
     *key = nullptr;
@@ -328,9 +433,11 @@ STATIC JsonUtilCode parseSimpleCmdArgs(ValkeyModuleString **argv, const int argc
 }
 
 STATIC JsonUtilCode parseNumIncrOrMultByCmdArgs(ValkeyModuleString **argv, const int argc,
-                                                ValkeyModuleString **key, const char **path, JValue *jvalue) {
+                                                ValkeyModuleString **key, const char **path,
+                                                JValue *jvalue, size_t *jvalue_size) {
     *key = nullptr;
     *path = nullptr;
+    *jvalue_size = 0;
 
     // we need exactly 4 arguments
     if (argc != 4) return JSONUTIL_WRONG_NUM_ARGS;
@@ -345,6 +452,7 @@ STATIC JsonUtilCode parseNumIncrOrMultByCmdArgs(ValkeyModuleString **argv, const
         return JSONUTIL_VALUE_NOT_NUMBER;
     }
     *jvalue = parser.GetJValue();
+    *jvalue_size = parser.GetJValueSize();
     return JSONUTIL_SUCCESS;
 }
 
@@ -577,9 +685,7 @@ int Command_JsonSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
 
         // end tracking memory
-        int64_t delta = jsonstats_end_track_mem(begin_val);
-        size_t doc_size = dom_get_doc_size(doc) + delta;
-        dom_set_doc_size(doc, doc_size);
+        END_TRACKING_MEMORY(ctx, "JSON.SET", doc, 0, begin_val)
 
         if (json_is_instrument_enabled_insert() || json_is_instrument_enabled_update()) {
             size_t len;
@@ -595,13 +701,14 @@ int Command_JsonSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         ValkeyModule_ModuleTypeSetValue(key, DocumentType, doc);
 
         // update stats
-        jsonstats_update_stats_on_insert(doc, true, 0, doc_size, doc_size);
+        size_t new_doc_size = dom_get_doc_size(doc);
+        jsonstats_update_stats_on_insert(doc, true, 0, new_doc_size, new_doc_size);
     } else {
         // fetch doc object from Valkey dict
         JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(key));
         if (doc == nullptr) return ValkeyModule_ReplyWithError(ctx, ERRMSG_JSON_DOCUMENT_NOT_FOUND);
-
         size_t orig_doc_size = dom_get_doc_size(doc);
+
         rc = dom_set_value(ctx, doc, args.path, args.json, args.json_len, args.is_create_only, args.is_update_only);
         if (rc != JSONUTIL_SUCCESS) {
             if (rc == JSONUTIL_NX_XX_CONDITION_NOT_SATISFIED)
@@ -610,11 +717,10 @@ int Command_JsonSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
         }
 
         // end tracking memory
-        int64_t delta = jsonstats_end_track_mem(begin_val);
-        size_t new_doc_size = dom_get_doc_size(doc) + delta;
-        dom_set_doc_size(doc, new_doc_size);
+        END_TRACKING_MEMORY(ctx, "JSON.SET", doc, orig_doc_size, begin_val)
 
         // update stats
+        size_t new_doc_size = dom_get_doc_size(doc);
         jsonstats_update_stats_on_update(doc, orig_doc_size, new_doc_size, args.json_len);
     }
 
@@ -622,6 +728,76 @@ int Command_JsonSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_ReplicateVerbatim(ctx);
     ValkeyModule_NotifyKeyspaceEvent(ctx, VALKEYMODULE_NOTIFY_GENERIC, "json.set", args.key);
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
+int Command_JsonMSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    ValkeyModule_AutoMemory(ctx);
+
+    MSetCmdArgs *args_list = nullptr;
+    size_t num_keys;
+    JsonUtilCode rc = parseAndValidateMSetCmdArgs(ctx, argv, argc, &args_list, &num_keys);
+    if (rc != JSONUTIL_SUCCESS) {
+        return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+    }
+
+    // Apply changes
+    size_t i;
+    for (i = 0; i < num_keys; i++) {
+        // begin tracking memory
+        int64_t begin_val = jsonstats_begin_track_mem();
+
+        if (args_list[i].is_root_path) { // Root document
+            // parse incoming JSON string
+            JDocument *doc;
+            rc = dom_parse(ctx, args_list[i].json, args_list[i].json_len, &doc);
+            if (rc != JSONUTIL_SUCCESS) {
+                dom_free_doc(doc);
+                goto cleanup;
+            }
+
+            int64_t delta = jsonstats_end_track_mem(begin_val);
+            size_t doc_size = dom_get_doc_size(doc) + delta;
+            dom_set_doc_size(doc, doc_size);
+
+            // Set Valkey key
+            ValkeyModule_ModuleTypeSetValue(args_list[i].key, DocumentType, doc);
+            // update stats
+            jsonstats_update_stats_on_insert(doc, true, 0, doc_size, doc_size);
+        } else { // Update existing document
+            JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(args_list[i].key));
+            size_t orig_doc_size = dom_get_doc_size(doc);
+
+            rc = dom_set_value(ctx, doc, args_list[i].path, args_list[i].json, args_list[i].json_len, false, false);
+            if (rc != JSONUTIL_SUCCESS) {
+                goto cleanup;
+            }
+
+            int64_t delta = jsonstats_end_track_mem(begin_val);
+            size_t new_doc_size = dom_get_doc_size(doc) + delta;
+            dom_set_doc_size(doc, new_doc_size);
+
+            // update stats
+            jsonstats_update_stats_on_update(doc, orig_doc_size, new_doc_size, args_list[i].json_len);
+        }
+
+        ValkeyModule_NotifyKeyspaceEvent(ctx, VALKEYMODULE_NOTIFY_GENERIC, "json.mset", args_list[i].key_str);
+        ValkeyModule_CloseKey(args_list[i].key);
+    }
+
+    // replicate the entire command
+    ValkeyModule_ReplicateVerbatim(ctx);
+    ValkeyModule_Free(args_list);
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+
+cleanup:
+    // Rollback & cleanup
+    for (size_t j = 0; j < num_keys; ++j) {
+        if (args_list[j].key) {
+            ValkeyModule_CloseKey(args_list[j].key);
+        }
+    }
+    ValkeyModule_Free(args_list);
+    return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
 }
 
 int Command_JsonGet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
@@ -782,12 +958,10 @@ int Command_JsonDel(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     }
 
     // end tracking memory
-    int64_t delta = jsonstats_end_track_mem(begin_val);
-    size_t new_doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, new_doc_size);
+    END_TRACKING_MEMORY(ctx, "JSON.DEL", doc, orig_doc_size, begin_val)
 
     // update stats
-    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, new_doc_size, abs(delta));
+    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, dom_get_doc_size(doc), abs(delta));
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -837,7 +1011,8 @@ int Command_JsonNumIncrBy(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int a
     ValkeyModuleString *key_str;
     const char *path;
     JValue jvalue;
-    JsonUtilCode rc = parseNumIncrOrMultByCmdArgs(argv, argc, &key_str, &path, &jvalue);
+    size_t jvalue_size;
+    JsonUtilCode rc = parseNumIncrOrMultByCmdArgs(argv, argc, &key_str, &path, &jvalue, &jvalue_size);
     if (rc != JSONUTIL_SUCCESS) {
         if (rc == JSONUTIL_WRONG_NUM_ARGS) return ValkeyModule_WrongArity(ctx);
         return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
@@ -849,12 +1024,22 @@ int Command_JsonNumIncrBy(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int a
 
     // fetch doc object from Valkey dict
     JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(key));
+    size_t orig_doc_size = dom_get_doc_size(doc);
+
+    // begin tracking memory
+    int64_t begin_val = jsonstats_begin_track_mem();
 
     // increment the value at path
     jsn::vector<double> vec;
     bool is_v2_path;
     rc = dom_increment_by(doc, path, &jvalue, vec, is_v2_path);
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+
+    // end tracking memory
+    END_TRACKING_MEMORY(ctx, "JSON.NUMINCRBY", doc, orig_doc_size, begin_val)
+
+    // update stats
+    jsonstats_update_stats_on_update(doc, orig_doc_size, dom_get_doc_size(doc), jvalue_size);
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -872,7 +1057,8 @@ int Command_JsonNumMultBy(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int a
     ValkeyModuleString *key_str;
     const char *path;
     JValue jvalue;
-    JsonUtilCode rc = parseNumIncrOrMultByCmdArgs(argv, argc, &key_str, &path, &jvalue);
+    size_t jvalue_size;
+    JsonUtilCode rc = parseNumIncrOrMultByCmdArgs(argv, argc, &key_str, &path, &jvalue, &jvalue_size);
     if (rc != JSONUTIL_SUCCESS) {
         if (rc == JSONUTIL_WRONG_NUM_ARGS) return ValkeyModule_WrongArity(ctx);
         return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
@@ -884,12 +1070,22 @@ int Command_JsonNumMultBy(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int a
 
     // fetch doc object from Valkey dict
     JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(key));
+    size_t orig_doc_size = dom_get_doc_size(doc);
+
+    // begin tracking memory
+    int64_t begin_val = jsonstats_begin_track_mem();
 
     // multiply the value at path
     jsn::vector<double> vec;
     bool is_v2_path;
     rc = dom_multiply_by(doc, path, &jvalue, vec, is_v2_path);
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+
+    // end tracking memory
+    END_TRACKING_MEMORY(ctx, "JSON.NUMMULTBY", doc, orig_doc_size, begin_val)
+
+    // update stats
+    jsonstats_update_stats_on_update(doc, orig_doc_size, dom_get_doc_size(doc), jvalue_size);
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -1022,12 +1218,10 @@ int Command_JsonStrAppend(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int a
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
 
     // end tracking memory
-    int64_t delta = jsonstats_end_track_mem(begin_val);
-    size_t new_doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, new_doc_size);
+    END_TRACKING_MEMORY(ctx, "JSON.STRAPPEND", doc, orig_doc_size, begin_val)
 
     // update stats
-    jsonstats_update_stats_on_update(doc, orig_doc_size, new_doc_size, json_len);
+    jsonstats_update_stats_on_update(doc, orig_doc_size, dom_get_doc_size(doc), json_len);
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -1091,12 +1285,19 @@ int Command_JsonToggle(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
 
     // fetch doc object from Valkey dict
     JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(key));
+    size_t orig_doc_size = dom_get_doc_size(doc);
+
+    // begin tracking memory
+    int64_t begin_val = jsonstats_begin_track_mem();
 
     // toggle the boolean value at this path
     jsn::vector<int> vec;
     bool is_v2_path;
     rc = dom_toggle(doc, path, vec, is_v2_path);
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+
+    // end tracking memory
+    END_TRACKING_MEMORY(ctx, "JSON.TOGGLE", doc, orig_doc_size, begin_val)
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -1302,12 +1503,10 @@ int Command_JsonArrAppend(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int a
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
 
     // end tracking memory
-    int64_t delta = jsonstats_end_track_mem(begin_val);
-    size_t new_doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, new_doc_size);
+    END_TRACKING_MEMORY(ctx, "JSON.STRAPPEND", doc, orig_doc_size, begin_val)
 
     // update stats
-    jsonstats_update_stats_on_update(doc, orig_doc_size, new_doc_size, args.total_json_len);
+    jsonstats_update_stats_on_update(doc, orig_doc_size, dom_get_doc_size(doc), args.total_json_len);
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -1379,12 +1578,10 @@ int Command_JsonArrPop(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc
     }
 
     // end tracking memory
-    int64_t delta = jsonstats_end_track_mem(begin_val);
-    size_t new_doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, new_doc_size);
+    END_TRACKING_MEMORY(ctx, "JSON.ARRPOP", doc, orig_doc_size, begin_val)
 
     // update stats
-    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, new_doc_size, abs(delta));
+    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, dom_get_doc_size(doc), abs(delta));
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -1426,12 +1623,10 @@ int Command_JsonArrInsert(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int a
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
 
     // end tracking memory
-    int64_t delta = jsonstats_end_track_mem(begin_val);
-    size_t new_doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, new_doc_size);
+    END_TRACKING_MEMORY(ctx, "JSON.ARRINSERT", doc, orig_doc_size, begin_val)
 
     // update stats
-    jsonstats_update_stats_on_insert(doc, false, orig_doc_size, new_doc_size, args.total_json_len);
+    jsonstats_update_stats_on_insert(doc, false, orig_doc_size, dom_get_doc_size(doc), args.total_json_len);
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -1475,12 +1670,10 @@ int Command_JsonArrTrim(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int arg
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
 
     // end tracking memory
-    int64_t delta = jsonstats_end_track_mem(begin_val);
-    size_t new_doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, new_doc_size);
+    END_TRACKING_MEMORY(ctx, "JSON.ARRTRIM", doc, orig_doc_size, begin_val)
 
     // update stats
-    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, new_doc_size, abs(delta));
+    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, dom_get_doc_size(doc), abs(delta));
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -1522,12 +1715,10 @@ int Command_JsonClear(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc)
     if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
 
     // end tracking memory
-    int64_t delta = jsonstats_end_track_mem(begin_val);
-    size_t new_doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, new_doc_size);
+    END_TRACKING_MEMORY(ctx, "JSON.CLEAR", doc, orig_doc_size, begin_val)
 
     // update stats
-    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, new_doc_size, abs(delta));
+    jsonstats_update_stats_on_delete(doc, false, orig_doc_size, dom_get_doc_size(doc), abs(delta));
 
     // replicate the command
     ValkeyModule_ReplicateVerbatim(ctx);
@@ -2082,21 +2273,22 @@ void *DocumentType_RdbLoad(ValkeyModuleIO *rdb, int encver) {
         return nullptr;
     }
 
-    // begin tracking memory
     JDocument *doc;
+    // begin tracking memory
     int64_t begin_val = jsonstats_begin_track_mem();
     JsonUtilCode rc = dom_load(&doc, rdb, encver);
+    // end tracking memory
     int64_t delta = jsonstats_end_track_mem(begin_val);
     if (rc != JSONUTIL_SUCCESS) {
         ValkeyModule_Assert(delta == 0);
         return nullptr;
     }
-    // end tracking memory
-    size_t doc_size = dom_get_doc_size(doc) + delta;
-    dom_set_doc_size(doc, doc_size);
+    size_t orig_doc_size = 0;
+    size_t new_doc_size = orig_doc_size + delta;
+    dom_set_doc_size(doc, new_doc_size);
 
     // update stats
-    jsonstats_update_stats_on_insert(doc, true, 0, doc_size, doc_size);
+    jsonstats_update_stats_on_insert(doc, true, orig_doc_size, new_doc_size, new_doc_size);
     return doc;
 }
 
@@ -2343,101 +2535,6 @@ int registerModuleConfigs(ValkeyModuleCtx *ctx) {
 }
 
 /*
- * Install stub datatype callback for aux_load.
- */
-bool install_stub(ValkeyModuleCtx *ctx,
-                  const char *type_name,
-                  int encver,
-                  int (*aux_load)(ValkeyModuleIO *, int encver, int when)) {
-    ValkeyModuleTypeMethods type_methods;
-    memset(&type_methods, 0, sizeof(ValkeyModuleTypeMethods));
-    type_methods.version = VALKEYMODULE_TYPE_METHOD_VERSION;
-    type_methods.aux_load = aux_load;
-    if (ValkeyModule_CreateDataType(ctx, type_name, encver, &type_methods) == nullptr) {
-        ValkeyModule_Log(ctx, "warning", "Failed to create data type %s", type_name);
-        return false;
-    }
-    ValkeyModule_Log(ctx, "debug", "Successfully installed stub data type %s", type_name);
-    return true;
-}
-
-/*
- * Load a string value.
- */
-bool loadString(ValkeyModuleIO *ctx, const char *caller) {
-    VALKEYMODULE_NOT_USED(caller);
-    size_t str_len;
-    std::unique_ptr<char> str(ValkeyModule_LoadStringBuffer(ctx, &str_len));
-    VALKEYMODULE_NOT_USED(str);
-    return true;
-}
-
-/*
- * Load an unsigned integer value
- */
-bool loadUnsigned(ValkeyModuleIO *ctx, const char *caller) {
-    VALKEYMODULE_NOT_USED(caller);
-    ValkeyModule_LoadUnsigned(ctx);
-    return true;
-}
-
-/*
- * Stub for scdtype0 data type.
- */
-#define SCDTYPE_ENCVER 1
-int scdtype_aux_load(ValkeyModuleIO *ctx, int encver, int when) {
-    VALKEYMODULE_NOT_USED(encver);
-    if (when == VALKEYMODULE_AUX_AFTER_RDB) {
-        if (!loadUnsigned(ctx, "scdtype")) return VALKEYMODULE_ERR;
-    }
-    return VALKEYMODULE_OK;
-}
-
-/*
- * Stub for ftindex0 data type. There is one integer of 0's.
- * There's an 18, a 19 and a 20. They don't appear to be any different when the data is empty :)
- */
-#define FTINDEX_ENCVER 20
-int ftindex_aux_load(ValkeyModuleIO *ctx, int encver, int when) {
-    VALKEYMODULE_NOT_USED(encver);
-    VALKEYMODULE_NOT_USED(when);
-    if (!loadUnsigned(ctx, "ftindex")) return VALKEYMODULE_ERR;
-    return VALKEYMODULE_OK;
-}
-
-#define GRAPHDT_ENCVER 11
-int graphdt_aux_load(ValkeyModuleIO *ctx, int encver, int when) {
-    VALKEYMODULE_NOT_USED(encver);
-    VALKEYMODULE_NOT_USED(when);
-    if (!loadUnsigned(ctx, "graphdt")) return VALKEYMODULE_ERR;
-    return VALKEYMODULE_OK;
-}
-
-#define GEARSDT_ENCVER 3
-int gearsdt_aux_load(ValkeyModuleIO *ctx, int encver, int when) {
-    VALKEYMODULE_NOT_USED(encver);
-    if (when == VALKEYMODULE_AUX_AFTER_RDB) {
-        if (!loadString(ctx, "gears-dt")) return VALKEYMODULE_ERR;
-        if (!loadUnsigned(ctx, "gears-dt")) return VALKEYMODULE_ERR;
-        if (!loadString(ctx, "gears-dt")) return VALKEYMODULE_ERR;
-        if (!loadUnsigned(ctx, "gears-dt")) return VALKEYMODULE_ERR;
-        if (!loadString(ctx, "gears-dt")) return VALKEYMODULE_ERR;
-        if (!loadUnsigned(ctx, "gears-dt")) return VALKEYMODULE_ERR;
-        if (!loadString(ctx, "gears-dt")) return VALKEYMODULE_ERR;
-    }
-    return VALKEYMODULE_OK;
-}
-
-#define GEARSRQ_ENCVER 1
-int gearsrq_aux_load(ValkeyModuleIO *ctx, int encver, int when) {
-    VALKEYMODULE_NOT_USED(encver);
-    if (when == VALKEYMODULE_AUX_BEFORE_RDB) {
-        if (!loadUnsigned(ctx, "gearsrq")) return VALKEYMODULE_ERR;
-    }
-    return VALKEYMODULE_OK;
-}
-
-/*
  * The hash function is FNV-1a (See https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)
  * We are looking for a 38-bit hash function. As recommended, we use the 64-bit FNV-1a constants and then
  * use XOR-folding to reduce the hash to 38 bits (as well as improving the randomness of the low order bit)
@@ -2543,15 +2640,6 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx) {
         return VALKEYMODULE_ERR;
     }
 
-    /*
-     * Now create the stub datatypes for search
-     */
-    if (!install_stub(ctx, "scdtype00", SCDTYPE_ENCVER, scdtype_aux_load)) return VALKEYMODULE_ERR;
-    if (!install_stub(ctx, "ft_index0", FTINDEX_ENCVER, ftindex_aux_load)) return VALKEYMODULE_ERR;
-    if (!install_stub(ctx, "graphdata", GRAPHDT_ENCVER, graphdt_aux_load)) return VALKEYMODULE_ERR;
-    if (!install_stub(ctx, "GEARS_DT0", GEARSDT_ENCVER, gearsdt_aux_load)) return VALKEYMODULE_ERR;
-    if (!install_stub(ctx, "GEAR_REQ0", GEARSRQ_ENCVER, gearsrq_aux_load)) return VALKEYMODULE_ERR;
-
     // Indicate that we can handle I/O errors ourself.
     ValkeyModule_SetModuleOptions(ctx, VALKEYMODULE_OPTIONS_HANDLE_IO_ERRORS);
 
@@ -2592,6 +2680,16 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx) {
     }
     if (ValkeyModule_SetCommandACLCategories(ValkeyModule_GetCommand(ctx,"JSON.SET"), cat_slow_write_deny) == VALKEYMODULE_ERR) {
         ValkeyModule_Log(ctx, "warning", "Failed to set command category for JSON.SET.");
+        return VALKEYMODULE_ERR;
+    }
+
+    if (ValkeyModule_CreateCommand(ctx, "JSON.MSET", Command_JsonMSet, cmdflg_slow_write_deny, 1, -3, 3)
+        == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "Failed to create command JSON.MSET.");
+        return VALKEYMODULE_ERR;
+    }
+    if (ValkeyModule_SetCommandACLCategories(ValkeyModule_GetCommand(ctx,"JSON.MSET"), cat_slow_write_deny) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "Failed to mset command category for JSON.MSET.");
         return VALKEYMODULE_ERR;
     }
 
@@ -2849,6 +2947,9 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx) {
 
     // Commands under RW + Update
     if (!set_command_info(ctx, "JSON.SET", -4, ks_read_write_update, 1, std::make_tuple(0, 1, 0))) {
+        return VALKEYMODULE_ERR;
+    }
+    if (!set_command_info(ctx, "JSON.MSET", -4, ks_read_write_update, 1, std::make_tuple(-3, 3, 0))) {
         return VALKEYMODULE_ERR;
     }
     // Commands under RW + Insert
