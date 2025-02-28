@@ -726,7 +726,10 @@ int Command_JsonMSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
     JsonUtilCode rc = parseAndValidateMSetCmdArgs(ctx, argv, argc, &args_list, &num_keys);
     if (rc != JSONUTIL_SUCCESS) {
         ValkeyModule_Free(args_list);
-        return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+        if (rc == JSONUTIL_WRONG_NUM_ARGS) 
+            return ValkeyModule_WrongArity(ctx); 
+        else
+            return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
     }
 
     // Apply changes
