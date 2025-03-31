@@ -1,7 +1,7 @@
 {
     "JSON.ARRPOP": {
         "summary": "Remove and returns the element at the given index. Popping an empty array returns null.",
-        "complexity": "O(1)",
+        "complexity": "O(N) where N is the number of jsons arrays matched by the path.",
         "group": "json",
         "module_since": "1.0.0",
         "arity": 2,
