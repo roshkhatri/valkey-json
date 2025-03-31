@@ -1,0 +1,26 @@
+{
+    "JSON.STRLEN": {
+        "summary": "Get the length of the JSON string values at the specified path.",
+        "complexity": "O(N) where N is the number of string values matched by the path.",
+        "group": "json",
+        "module_since": "1.0.0",
+        "arity": 2,
+        "acl_categories": [
+            "READ",
+            "FAST",
+            "JSON"
+        ],
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "path",
+                "type": "string",
+                "optional": true
+            }
+        ]
+    }
+}

@@ -1,0 +1,39 @@
+{
+    "JSON.ARRINDEX": {
+        "summary": "Search for the first occurrence of a scalar JSON value in arrays located at the specified path. Indices out of range are adjusted.",
+        "complexity": "O(N), where N is the length of the array.",
+        "group": "json",
+        "module_since": "1.0.0",
+        "arity": 4,
+        "acl_categories": [
+            "READ",
+            "FAST",
+            "JSON"
+        ],
+        "arguments": [
+            {
+                "name": "key",
+                "type": "key",
+                "key_spec_index": 0
+            },
+            {
+                "name": "path",
+                "type": "string"
+            },
+            {
+                "name": "json-scalar",
+                "type": "string"
+            },
+            {
+                "name": "start",
+                "type": "integer",
+                "optional": true
+            },
+            {
+                "name": "end",
+                "type": "integer",
+                "optional": true
+            }
+        ]
+    }
+}
