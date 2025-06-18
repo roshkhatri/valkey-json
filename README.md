@@ -33,7 +33,7 @@ CFLAGS="-O0 -Wno-unused-function" ./build.sh
 # Clean build and test artifacts
 ./build.sh --clean
 ```
-The script clones the Valkey repository to obtain `valkeymodule.h` for both `--release` and `--unit` unless you set `VALKEY_HEADER_DIR` to a custom directory.
+The script clones the Valkey repository automatically when `--release` or `--unit` is used so the build can copy `valkeymodule.h`.
 #### To build the module with ASAN and run tests
 ```text
 export ASAN_BUILD=true

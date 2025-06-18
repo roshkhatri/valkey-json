@@ -31,12 +31,11 @@ endif()
 # Set the name of the JSON shared library
 set(JSON_MODULE_LIB json)
 
-# Skip building Valkey when building in release or unit-test mode. When
-# RELEASE_BUILD is ON the variable VALKEY_HEADER_DIR must point to the directory
-# containing `valkeymodule.h`. Only integration tests require the full Valkey
-# sources.
-option(RELEASE_BUILD "Skip building Valkey and use provided valkeymodule.h" OFF)
-set(VALKEY_HEADER_DIR "" CACHE PATH "Directory containing valkeymodule.h when RELEASE_BUILD=ON")
+# Skip building Valkey when building in release or unit-test mode. Integration
+# tests require the full Valkey sources while release and unit modes only need
+# the `valkeymodule.h` header. When `RELEASE_BUILD` is enabled the build system
+# clones Valkey but does not compile it.
+option(RELEASE_BUILD "Clone Valkey only for valkeymodule.h" OFF)
 
 # Define the Valkey directories used when building from source
 set(VALKEY_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/_deps/valkey-src")
@@ -63,55 +62,51 @@ endif()
 
 message("CFLAGS: ${CFLAGS}")
 
-# Build Valkey from source unless this is a release build
-if(NOT RELEASE_BUILD)
+# Determine Valkey build command depending on build type
+if(RELEASE_BUILD)
+    set(BUILD_CMD "")
+else()
     if(ENABLE_ASAN)
         message("Building Valkey engine with Address Sanitizer enabled")
         set(BUILD_CMD make distclean && make -j SANITIZER=address)
     else()
         set(BUILD_CMD make distclean && make -j)
     endif()
-
-    ExternalProject_Add(
-        valkey
-        GIT_REPOSITORY https://github.com/valkey-io/valkey.git
-        GIT_TAG ${VALKEY_VERSION}
-        PREFIX ${VALKEY_DOWNLOAD_DIR}
-        CONFIGURE_COMMAND ""
-        BUILD_COMMAND ${BUILD_CMD}
-        INSTALL_COMMAND ""
-        BUILD_IN_SOURCE 1
-    )
 endif()
+
+ExternalProject_Add(
+    valkey
+    GIT_REPOSITORY https://github.com/valkey-io/valkey.git
+    GIT_TAG ${VALKEY_VERSION}
+    PREFIX ${VALKEY_DOWNLOAD_DIR}
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ${BUILD_CMD}
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE 1
+)
 
 # Define the paths for the copied files
 set(VALKEY_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/include")
 set(VALKEY_BINARY_DEST "${CMAKE_CURRENT_SOURCE_DIR}/tst/integration/.build/binaries/${VALKEY_VERSION}")
 
-if(NOT RELEASE_BUILD)
-    ExternalProject_Add_Step(
-        valkey
-        copy_header_files
-        COMMENT "Copying header files to include/ directory"
-        DEPENDEES download
-        DEPENDERS configure
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${VALKEY_INCLUDE_DIR}
-        COMMAND ${CMAKE_COMMAND} -E copy ${VALKEY_DOWNLOAD_DIR}/src/valkey/src/valkeymodule.h ${VALKEY_INCLUDE_DIR}/valkeymodule.h
-        ALWAYS 1
-    )
+ExternalProject_Add_Step(
+    valkey
+    copy_header_files
+    COMMENT "Copying header files to include/ directory"
+    DEPENDEES download
+    DEPENDERS configure
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${VALKEY_INCLUDE_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy ${VALKEY_DOWNLOAD_DIR}/src/valkey/src/valkeymodule.h ${VALKEY_INCLUDE_DIR}/valkeymodule.h
+    ALWAYS 1
+)
 
+if(NOT RELEASE_BUILD)
     add_custom_command(TARGET valkey
         POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory ${VALKEY_BINARY_DEST}
         COMMAND ${CMAKE_COMMAND} -E copy ${VALKEY_BIN_DIR}/valkey-server ${VALKEY_BINARY_DEST}/valkey-server
-        COMMENT "Copied valkeymodule.h and valkey-server to destination directories"
+        COMMENT "Copied valkey-server to destination directory"
     )
-else()
-    if(NOT VALKEY_HEADER_DIR)
-        message(FATAL_ERROR "VALKEY_HEADER_DIR must be set when RELEASE_BUILD is ON")
-    endif()
-    file(MAKE_DIRECTORY ${VALKEY_INCLUDE_DIR})
-    file(COPY "${VALKEY_HEADER_DIR}/valkeymodule.h" DESTINATION ${VALKEY_INCLUDE_DIR})
 endif()
 
 # Integration tests require the valkey-test-framework which is only needed when
@@ -127,7 +122,7 @@ if(NOT RELEASE_BUILD)
         valkey-test-framework
         GIT_REPOSITORY https://github.com/valkey-io/valkey-test-framework.git
         GIT_TAG ${VALKEY_TEST_FRAMEWORK_COMMIT}
-        GIT_SHALLOW TRUE
+        GIT_SHALLOW FALSE
         PREFIX "${VALKEY_TEST_FRAMEWORK_DOWNLOAD_DIR}"
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""

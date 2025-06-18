@@ -39,7 +39,4 @@ target_sources(${OBJECT_TARGET}
 )
 
 add_library(${JSON_MODULE_LIB} SHARED $<TARGET_OBJECTS:${OBJECT_TARGET}>)
-
-if(NOT RELEASE_BUILD)
-    add_dependencies(${OBJECT_TARGET} valkey)
-endif()
+add_dependencies(${OBJECT_TARGET} valkey)

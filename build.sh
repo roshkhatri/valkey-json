@@ -69,15 +69,7 @@ else
 fi
 
 if [ $RELEASE_BUILD -eq 1 ]; then
-    if [ -z "$VALKEY_HEADER_DIR" ]; then
-        VALKEY_CLONE_DIR="$BUILD_DIR/valkey-src"
-        if [ ! -d "$VALKEY_CLONE_DIR" ]; then
-            echo "Cloning Valkey repository for header..."
-            git clone --depth 1 --branch "$SERVER_VERSION" https://github.com/valkey-io/valkey.git "$VALKEY_CLONE_DIR"
-        fi
-        VALKEY_HEADER_DIR="$VALKEY_CLONE_DIR/src"
-    fi
-    CMAKE_FLAGS="$CMAKE_FLAGS -DVALKEY_HEADER_DIR=$VALKEY_HEADER_DIR -DRELEASE_BUILD=ON"
+    CMAKE_FLAGS="$CMAKE_FLAGS -DRELEASE_BUILD=ON"
 else
     CMAKE_FLAGS="$CMAKE_FLAGS -DRELEASE_BUILD=OFF"
 fi
