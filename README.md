@@ -30,6 +30,8 @@ CFLAGS="-O0 -Wno-unused-function" ./build.sh
 ./build.sh --unit
 # Run only integration tests
 ./build.sh --integration
+# Clean build and test artifacts
+./build.sh --clean
 ```
 The script clones the Valkey repository to obtain `valkeymodule.h` for both `--release` and `--unit` unless you set `VALKEY_HEADER_DIR` to a custom directory.
 #### To build the module with ASAN and run tests
@@ -37,6 +39,8 @@ The script clones the Valkey repository to obtain `valkeymodule.h` for both `--r
 export ASAN_BUILD=true
 ./build.sh
 ```
+`ASAN_BUILD` works with any of the build script options and enables memory leak
+checks in the integration tests.
 
 #### To build just the module
 ```text
@@ -82,6 +86,8 @@ e.g.,
 TEST_PATTERN=test_sanity make -j test
 TEST_PATTERN=test_rdb.py make -j test
 ```
+You can also set `TEST_PATTERN` when running `build.sh` to pass the pattern through
+to the integration tests.
 
 ## Load the Module
 To test the module with a Valkey, you can load the module using any of the following ways:

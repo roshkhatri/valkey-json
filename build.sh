@@ -3,10 +3,11 @@
 set -e
 
 usage() {
-    echo "Usage: $0 [--release] [--unit] [--integration]"
+    echo "Usage: $0 [--release] [--unit] [--integration] [--clean]"
     echo "  --release       Build only the module; clone Valkey for valkeymodule.h"
     echo "  --unit          Run unit tests (clones Valkey for header)"
     echo "  --integration   Run integration tests"
+    echo "  --clean         Remove build artifacts and exit"
     exit 1
 }
 
@@ -15,6 +16,7 @@ BUILD_DIR="$SCRIPT_DIR/build"
 RUN_UNIT=1
 RUN_INTEGRATION=1
 RELEASE_BUILD=0
+CLEAN_BUILD=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -32,12 +34,24 @@ while [[ $# -gt 0 ]]; do
             RUN_UNIT=0
             RUN_INTEGRATION=1
             ;;
+        --clean)
+            CLEAN_BUILD=1
+            RUN_UNIT=0
+            RUN_INTEGRATION=0
+            ;;
         *)
             usage
             ;;
     esac
     shift
 done
+
+if [ $CLEAN_BUILD -eq 1 ]; then
+    echo "Cleaning build artifacts..."
+    rm -rf "$BUILD_DIR" tst/integration/valkeytests tst/integration/.build src/include
+    echo "Clean completed"
+    exit 0
+fi
 
 if [ -z "$SERVER_VERSION" ]; then
     echo "SERVER_VERSION environment variable is not set. Defaulting to \"unstable\"."
@@ -63,7 +77,9 @@ if [ $RELEASE_BUILD -eq 1 ]; then
         fi
         VALKEY_HEADER_DIR="$VALKEY_CLONE_DIR/src"
     fi
-    CMAKE_FLAGS="$CMAKE_FLAGS -DRELEASE_BUILD=ON -DVALKEY_HEADER_DIR=$VALKEY_HEADER_DIR"
+    CMAKE_FLAGS="$CMAKE_FLAGS -DVALKEY_HEADER_DIR=$VALKEY_HEADER_DIR -DRELEASE_BUILD=ON"
+else
+    CMAKE_FLAGS="$CMAKE_FLAGS -DRELEASE_BUILD=OFF"
 fi
 
 if [ -z "${CFLAGS}" ]; then
