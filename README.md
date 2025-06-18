@@ -22,6 +22,16 @@ Custom compiler flags can be passed to the build script via environment variable
 ```text
 CFLAGS="-O0 -Wno-unused-function" ./build.sh
 ```
+# Additional build script options:
+```text
+# Build the module for release (clones Valkey for valkeymodule.h only)
+./build.sh --release
+# Run only unit tests
+./build.sh --unit
+# Run only integration tests
+./build.sh --integration
+```
+The script clones the Valkey repository to obtain `valkeymodule.h` for both `--release` and `--unit` unless you set `VALKEY_HEADER_DIR` to a custom directory.
 #### To build the module with ASAN and run tests
 ```text
 export ASAN_BUILD=true

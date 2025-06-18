@@ -1,68 +1,105 @@
 #!/bin/bash
 
-# Script to build valkey-json module, build it and generate .so files, run unit and integration tests.
-
-# # Exit the script if any command fails
 set -e
 
-SCRIPT_DIR=$(pwd)
-echo "Script Directory: $SCRIPT_DIR"
+usage() {
+    echo "Usage: $0 [--release] [--unit] [--integration]"
+    echo "  --release       Build only the module; clone Valkey for valkeymodule.h"
+    echo "  --unit          Run unit tests (clones Valkey for header)"
+    echo "  --integration   Run integration tests"
+    exit 1
+}
 
-# If environment variable SERVER_VERSION is not set, default to "unstable"
+SCRIPT_DIR=$(pwd)
+BUILD_DIR="$SCRIPT_DIR/build"
+RUN_UNIT=1
+RUN_INTEGRATION=1
+RELEASE_BUILD=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --release)
+            RELEASE_BUILD=1
+            RUN_UNIT=0
+            RUN_INTEGRATION=0
+            ;;
+        --unit)
+            RUN_UNIT=1
+            RUN_INTEGRATION=0
+            RELEASE_BUILD=1
+            ;;
+        --integration)
+            RUN_UNIT=0
+            RUN_INTEGRATION=1
+            ;;
+        *)
+            usage
+            ;;
+    esac
+    shift
+done
+
 if [ -z "$SERVER_VERSION" ]; then
     echo "SERVER_VERSION environment variable is not set. Defaulting to \"unstable\"."
     export SERVER_VERSION="unstable"
 fi
 
-# Variables
-BUILD_DIR="$SCRIPT_DIR/build"
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
 
-# Build the Valkey JSON module using CMake
-echo "Building valkey-json..."
-if [ ! -d "$BUILD_DIR" ]; then
-    mkdir $BUILD_DIR
-fi
-cd $BUILD_DIR
-
-if [ ! -z "${ASAN_BUILD}" ]; then
+CMAKE_FLAGS=""
+if [ -n "${ASAN_BUILD}" ]; then
     CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON"
 else
-    CMAKE_FLAGS=""
+    CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release"
+fi
+
+if [ $RELEASE_BUILD -eq 1 ]; then
+    if [ -z "$VALKEY_HEADER_DIR" ]; then
+        VALKEY_CLONE_DIR="$BUILD_DIR/valkey-src"
+        if [ ! -d "$VALKEY_CLONE_DIR" ]; then
+            echo "Cloning Valkey repository for header..."
+            git clone --depth 1 --branch "$SERVER_VERSION" https://github.com/valkey-io/valkey.git "$VALKEY_CLONE_DIR"
+        fi
+        VALKEY_HEADER_DIR="$VALKEY_CLONE_DIR/src"
+    fi
+    CMAKE_FLAGS="$CMAKE_FLAGS -DRELEASE_BUILD=ON -DVALKEY_HEADER_DIR=$VALKEY_HEADER_DIR"
 fi
 
 if [ -z "${CFLAGS}" ]; then
-  cmake .. -DVALKEY_VERSION=${SERVER_VERSION} ${CMAKE_FLAGS}
+    cmake .. -DVALKEY_VERSION=${SERVER_VERSION} ${CMAKE_FLAGS}
 else
-  cmake .. -DVALKEY_VERSION=${SERVER_VERSION} -DCFLAGS=${CFLAGS} ${CMAKE_FLAGS}
-fi
-make
-
-# Running the Valkey JSON unit tests.
-echo "Running Unit Tests..."
-make -j unit
-
-cd $SCRIPT_DIR
-
-REQUIREMENTS_FILE="requirements.txt"
-
-# Check if pip is available
-if command -v pip > /dev/null 2>&1; then
-    echo "Using pip to install packages..."
-    pip install -r "$SCRIPT_DIR/$REQUIREMENTS_FILE"
-# Check if pip3 is available
-elif command -v pip3 > /dev/null 2>&1; then
-    echo "Using pip3 to install packages..."
-    pip3 install -r "$SCRIPT_DIR/$REQUIREMENTS_FILE"
-else
-    echo "Error: Neither pip nor pip3 is available. Please install Python package installer."
-    exit 1
+    cmake .. -DVALKEY_VERSION=${SERVER_VERSION} -DCFLAGS="${CFLAGS}" ${CMAKE_FLAGS}
 fi
 
-export MODULE_PATH="$SCRIPT_DIR/build/src/libjson.so"
+make -j
 
-# Running the Valkey JSON integration tests.
-echo "Running the integration tests..."
-cd $BUILD_DIR
-make -j test
+if [ $RELEASE_BUILD -eq 1 ] && [ $RUN_UNIT -eq 0 ] && [ $RUN_INTEGRATION -eq 0 ]; then
+    echo "Release build completed"
+    exit 0
+fi
 
-echo "Build and Integration Tests succeeded"
+if [ $RUN_UNIT -eq 1 ]; then
+    echo "Running unit tests..."
+    make -j unit
+fi
+
+cd "$SCRIPT_DIR"
+
+if [ $RUN_INTEGRATION -eq 1 ]; then
+    REQUIREMENTS_FILE="requirements.txt"
+    if command -v pip > /dev/null 2>&1; then
+        pip install -r "$SCRIPT_DIR/$REQUIREMENTS_FILE"
+    elif command -v pip3 > /dev/null 2>&1; then
+        pip3 install -r "$SCRIPT_DIR/$REQUIREMENTS_FILE"
+    else
+        echo "Error: Neither pip nor pip3 is available."
+        exit 1
+    fi
+    export MODULE_PATH="$BUILD_DIR/src/libjson.so"
+    echo "Running integration tests..."
+    cd "$BUILD_DIR"
+    make -j test
+fi
+
+echo "Build script completed"
