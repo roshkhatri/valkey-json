@@ -49,6 +49,12 @@ TEST_PATTERN=test_sanity ./build.sh --integration
 TEST_PATTERN=test_rdb.py ./build.sh --integration
 ```
 
+## Cleaning
+```text
+# Clean build artifacts
+./build.sh clean
+```
+
 ## Load the Module
 To test the module with a Valkey, you can load the module using any of the following ways:
 
