@@ -4,17 +4,25 @@ Valkey-json is a Valkey module written in C++ that provides native JSON (JavaScr
 
 Valkey-json leverages [RapidJSON](https://rapidjson.org/), a high-performance JSON parser and generator for C++, chosen for its small footprint and exceptional performance and memory efficiency. As a header-only library with no external dependencies, RapidJSON provides robust Unicode support while maintaining a compact memory profile of just 16 bytes per JSON value on most 32/64-bit machines.
 
-## Building and Testing
+### Building and testing the module
+Valkey JSON  uses CMake for its build system. To simplify, a build script is provided. 
 
-#### To build the module and run tests
+To build and run all tests, use:
 ```text
-# Build valkey-server (unstable) and run integration tests
 ./build.sh
 ```
-
-The default valkey version is "unstable". To override it, do:
+To build only valkey-json module, use:
 ```text
-# Build valkey-server (8.0) and run integration tests
+./build.sh --release
+```
+To view the available arguments, use:
+```text
+./build.sh --help
+```
+
+The default valkey version is "unstable" for integration tests. To override it, do:
+```text
+# Build valkey-server (8.0)
 SERVER_VERSION=8.0 ./build.sh
 ```
 
@@ -22,19 +30,8 @@ Custom compiler flags can be passed to the build script via environment variable
 ```text
 CFLAGS="-O0 -Wno-unused-function" ./build.sh
 ```
-# Additional build script options:
-```text
-# Build the module for release (clones Valkey for valkeymodule.h only)
-./build.sh --release
-# Run only unit tests
-./build.sh --unit
-# Run only integration tests
-./build.sh --integration
-# Clean build and test artifacts
-./build.sh --clean
-```
-The script clones the Valkey repository automatically when `--release` or `--unit` is used so the build can copy `valkeymodule.h`.
-#### To build the module with ASAN and run tests
+
+To build the module with ASAN and run tests
 ```text
 export ASAN_BUILD=true
 ./build.sh
@@ -42,52 +39,15 @@ export ASAN_BUILD=true
 `ASAN_BUILD` works with any of the build script options and enables memory leak
 checks in the integration tests.
 
-#### To build just the module
+To run single integration test:
 ```text
-mkdir build
-cd build
-cmake ..
-make
-```
-
-The default valkey version is "unstable". To override it, do:
-```text
-mkdir build
-cd build
-cmake .. -DVALKEY_VERSION=8.0
-make
-```
-
-Custom compiler flags can be passed to cmake via variable CFLAGS. For example:
-```text
-mkdir build
-cd build
-cmake .. -DCFLAGS="-O0 -Wno-unused-function"
-make
-```
-
-#### To run all unit tests:
-```text
-cd build
-make -j unit
-```
-
-#### To run all integration tests:
-```text
-make -j test
-```
-
-#### To run one integration test:
-```text
-TEST_PATTERN=<test-function-or-file> make -j test
+TEST_PATTERN=<test-function-or-file> ./build.sh --integration
 ```
 e.g.,
 ```text
-TEST_PATTERN=test_sanity make -j test
-TEST_PATTERN=test_rdb.py make -j test
+TEST_PATTERN=test_sanity ./build.sh --integration
+TEST_PATTERN=test_rdb.py ./build.sh --integration
 ```
-You can also set `TEST_PATTERN` when running `build.sh` to pass the pattern through
-to the integration tests.
 
 ## Load the Module
 To test the module with a Valkey, you can load the module using any of the following ways:

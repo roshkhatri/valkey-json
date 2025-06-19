@@ -36,6 +36,8 @@ set(JSON_MODULE_LIB json)
 # the `valkeymodule.h` header. When `RELEASE_BUILD` is enabled the build system
 # clones Valkey but does not compile it.
 option(RELEASE_BUILD "Clone Valkey only for valkeymodule.h" OFF)
+option(ENABLE_UNIT_TESTS "Enable unit tests" ON)
+option(ENABLE_INTEGRATION_TESTS "Enable integration tests" ON)
 
 # Define the Valkey directories used when building from source
 set(VALKEY_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/_deps/valkey-src")
@@ -61,26 +63,30 @@ if(ENABLE_ASAN)
 endif()
 
 message("CFLAGS: ${CFLAGS}")
-
+message("RELEASE_BUILD: ${RELEASE_BUILD}")
+message("ENABLE_UNIT_TESTS: ${ENABLE_UNIT_TESTS}")
+message("ENABLE_INTEGRATION_TESTS: ${ENABLE_INTEGRATION_TESTS}")
 # Determine Valkey build command depending on build type
-if(RELEASE_BUILD)
-    set(BUILD_CMD "")
+if((RELEASE_BUILD OR ENABLE_UNIT_TESTS) AND NOT ENABLE_INTEGRATION_TESTS)
+    set(VALKEY_BUILD_CMD ${CMAKE_COMMAND} -E echo "Skipping build step for release build")
 else()
     if(ENABLE_ASAN)
         message("Building Valkey engine with Address Sanitizer enabled")
-        set(BUILD_CMD make distclean && make -j SANITIZER=address)
+        set(VALKEY_BUILD_CMD make distclean && make -j SANITIZER=address)
     else()
-        set(BUILD_CMD make distclean && make -j)
+        set(VALKEY_BUILD_CMD make distclean && make -j)
     endif()
 endif()
 
+message("Valkey build command: ${VALKEY_BUILD_CMD}")
+message("CMAKE_CMD : ${CMAKE_COMMAND}")
 ExternalProject_Add(
     valkey
     GIT_REPOSITORY https://github.com/valkey-io/valkey.git
     GIT_TAG ${VALKEY_VERSION}
     PREFIX ${VALKEY_DOWNLOAD_DIR}
     CONFIGURE_COMMAND ""
-    BUILD_COMMAND ${BUILD_CMD}
+    BUILD_COMMAND ${VALKEY_BUILD_CMD}
     INSTALL_COMMAND ""
     BUILD_IN_SOURCE 1
 )
@@ -100,18 +106,16 @@ ExternalProject_Add_Step(
     ALWAYS 1
 )
 
-if(NOT RELEASE_BUILD)
-    add_custom_command(TARGET valkey
-        POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${VALKEY_BINARY_DEST}
-        COMMAND ${CMAKE_COMMAND} -E copy ${VALKEY_BIN_DIR}/valkey-server ${VALKEY_BINARY_DEST}/valkey-server
-        COMMENT "Copied valkey-server to destination directory"
-    )
-endif()
-
 # Integration tests require the valkey-test-framework which is only needed when
 # building Valkey from source.
-if(NOT RELEASE_BUILD)
+if(ENABLE_INTEGRATION_TESTS)
+    # Copy the valkey-server binary after building
+    add_custom_command(TARGET valkey
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${VALKEY_BINARY_DEST}
+            COMMAND ${CMAKE_COMMAND} -E copy ${VALKEY_BIN_DIR}/valkey-server ${VALKEY_BINARY_DEST}/valkey-server
+            COMMENT "Copied valkey-server to destination directory"
+        )
     # Define valkey-test-framework commit id
     set(VALKEY_TEST_FRAMEWORK_COMMIT "9fb28b74efd122324db00498a2fde6e5d281c90f" CACHE STRING "Valkey-test-framework commit to use")
 
@@ -194,9 +198,12 @@ FetchContent_MakeAvailable(rapidjson)
 
 add_subdirectory(src)
 
-add_subdirectory(tst)
+if(ENABLE_UNIT_TESTS OR ENABLE_INTEGRATION_TESTS)
+    add_subdirectory(tst)
+endif()
 
-if(NOT RELEASE_BUILD)
+if(ENABLE_INTEGRATION_TESTS)
+    message("adding test target")
     add_custom_target(test
         COMMENT "Run valkey-json integration tests"
         USES_TERMINAL

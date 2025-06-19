@@ -50,7 +50,7 @@ jobs:
       - name: Run integration tests
         run: ./build.sh --integration
 
-  asan-integration:
+  asan-tests:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -71,4 +71,4 @@ jobs:
       - name: Run ASAN integration tests
         run: |
           export ASAN_BUILD=true
-          ./build.sh --integration
+          ./build.sh

@@ -2,13 +2,25 @@
 
 set -e
 
-usage() {
-    echo "Usage: $0 [--release] [--unit] [--integration] [--clean]"
-    echo "  --release       Build only the module; clone Valkey for valkeymodule.h"
-    echo "  --unit          Run unit tests (clones Valkey for header)"
-    echo "  --integration   Run integration tests"
-    echo "  --clean         Remove build artifacts and exit"
-    exit 1
+function print_usage() {
+cat<<EOF
+Usage: build.sh [--release] [--unit] [--integration] [--clean]
+
+    --help | -h               Print this help message and exit.
+    --release                 Builds the release configuration.
+    --unit                    Builds the unit tests configuration.
+    --integration             Builds the integration tests configuration.
+    --clean                   Cleans the build artifacts.
+
+Example usage:
+
+    # Build the release configuration,
+    ./build.sh --release
+
+    # Cleans the build artifacts,
+    ./build.sh --clean
+
+EOF
 }
 
 SCRIPT_DIR=$(pwd)
@@ -18,8 +30,11 @@ RUN_INTEGRATION=1
 RELEASE_BUILD=0
 CLEAN_BUILD=0
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
+## Parse command line argument
+while [[ $# -gt 0 ]]; 
+do
+    arg="$1"
+    case $arg in
         --release)
             RELEASE_BUILD=1
             RUN_UNIT=0
@@ -28,7 +43,7 @@ while [[ $# -gt 0 ]]; do
         --unit)
             RUN_UNIT=1
             RUN_INTEGRATION=0
-            RELEASE_BUILD=1
+            RELEASE_BUILD=0
             ;;
         --integration)
             RUN_UNIT=0
@@ -39,16 +54,22 @@ while [[ $# -gt 0 ]]; do
             RUN_UNIT=0
             RUN_INTEGRATION=0
             ;;
-        *)
-            usage
+        --help|-h)
+            print_usage
+            exit 0
             ;;
-    esac
+        *)
+            print_usage
+            exit 1
+            ;;
+        esac
     shift
 done
 
 if [ $CLEAN_BUILD -eq 1 ]; then
     echo "Cleaning build artifacts..."
-    rm -rf "$BUILD_DIR" tst/integration/valkeytests tst/integration/.build src/include
+    rm -rf "$BUILD_DIR" tst/integration/valkeytests tst/integration/.build src/include 
+    rm -rf tst/integration/assets tst/integration/test-data tst/integration/report.html
     echo "Clean completed"
     exit 0
 fi
@@ -68,11 +89,25 @@ else
     CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release"
 fi
 
-if [ $RELEASE_BUILD -eq 1 ]; then
-    CMAKE_FLAGS="$CMAKE_FLAGS -DRELEASE_BUILD=ON"
+if [ $RUN_UNIT -eq 1 ]; then
+    ENABLE_UNIT_TESTS=ON
 else
-    CMAKE_FLAGS="$CMAKE_FLAGS -DRELEASE_BUILD=OFF"
+    ENABLE_UNIT_TESTS=OFF
 fi
+
+if [ $RUN_INTEGRATION -eq 1 ]; then
+    ENABLE_INTEGRATION_TESTS=ON
+else
+    ENABLE_INTEGRATION_TESTS=OFF
+fi
+
+if [ $RELEASE_BUILD -eq 1 ]; then
+    ENABLE_RELEASE_BUILD=ON
+else
+    ENABLE_RELEASE_BUILD=OFF
+fi
+
+CMAKE_FLAGS="$CMAKE_FLAGS -DENABLE_UNIT_TESTS=${ENABLE_UNIT_TESTS} -DENABLE_INTEGRATION_TESTS=${ENABLE_INTEGRATION_TESTS} -DRELEASE_BUILD=${ENABLE_RELEASE_BUILD}"
 
 if [ -z "${CFLAGS}" ]; then
     cmake .. -DVALKEY_VERSION=${SERVER_VERSION} ${CMAKE_FLAGS}
@@ -80,21 +115,18 @@ else
     cmake .. -DVALKEY_VERSION=${SERVER_VERSION} -DCFLAGS="${CFLAGS}" ${CMAKE_FLAGS}
 fi
 
-make -j
-
 if [ $RELEASE_BUILD -eq 1 ] && [ $RUN_UNIT -eq 0 ] && [ $RUN_INTEGRATION -eq 0 ]; then
+    make -j
     echo "Release build completed"
     exit 0
-fi
-
-if [ $RUN_UNIT -eq 1 ]; then
-    echo "Running unit tests..."
+elif [ $RUN_UNIT -eq 1 ]; then
     make -j unit
+    echo "Building valkey-json and running unit tests completed"
 fi
-
-cd "$SCRIPT_DIR"
 
 if [ $RUN_INTEGRATION -eq 1 ]; then
+    make -j
+    cd "$SCRIPT_DIR"
     REQUIREMENTS_FILE="requirements.txt"
     if command -v pip > /dev/null 2>&1; then
         pip install -r "$SCRIPT_DIR/$REQUIREMENTS_FILE"
@@ -105,9 +137,9 @@ if [ $RUN_INTEGRATION -eq 1 ]; then
         exit 1
     fi
     export MODULE_PATH="$BUILD_DIR/src/libjson.so"
-    echo "Running integration tests..."
     cd "$BUILD_DIR"
-    make -j test
+    echo "Running integration tests...${TEST_PATTERN}"
+    TEST_PATTERN=${TEST_PATTERN} make -j test
 fi
 
 echo "Build script completed"
