@@ -31,13 +31,9 @@ endif()
 # Set the name of the JSON shared library
 set(JSON_MODULE_LIB json)
 
-# Skip building Valkey when building in release or unit-test mode. Integration
-# tests require the full Valkey sources while release and unit modes only need
-# the `valkeymodule.h` header. When `RELEASE_BUILD` is enabled the build system
-# clones Valkey but does not compile it.
-option(RELEASE_BUILD "Clone Valkey only for valkeymodule.h" OFF)
-option(ENABLE_UNIT_TESTS "Enable unit tests" ON)
-option(ENABLE_INTEGRATION_TESTS "Enable integration tests" ON)
+option(RELEASE_BUILD "Build only valkey-json module" OFF)
+option(ENABLE_UNIT_TESTS "Build the module and runs unit tests" ON)
+option(ENABLE_INTEGRATION_TESTS "Build the module and runs integration tests" ON)
 
 # Define the Valkey directories used when building from source
 set(VALKEY_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/_deps/valkey-src")
@@ -62,24 +58,17 @@ if(ENABLE_ASAN)
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${ASAN_FLAGS}")
 endif()
 
-message("CFLAGS: ${CFLAGS}")
-message("RELEASE_BUILD: ${RELEASE_BUILD}")
-message("ENABLE_UNIT_TESTS: ${ENABLE_UNIT_TESTS}")
-message("ENABLE_INTEGRATION_TESTS: ${ENABLE_INTEGRATION_TESTS}")
 # Determine Valkey build command depending on build type
 if((RELEASE_BUILD OR ENABLE_UNIT_TESTS) AND NOT ENABLE_INTEGRATION_TESTS)
     set(VALKEY_BUILD_CMD ${CMAKE_COMMAND} -E echo "Skipping build step for release build")
 else()
     if(ENABLE_ASAN)
-        message("Building Valkey engine with Address Sanitizer enabled")
         set(VALKEY_BUILD_CMD make distclean && make -j SANITIZER=address)
     else()
         set(VALKEY_BUILD_CMD make distclean && make -j)
     endif()
 endif()
 
-message("Valkey build command: ${VALKEY_BUILD_CMD}")
-message("CMAKE_CMD : ${CMAKE_COMMAND}")
 ExternalProject_Add(
     valkey
     GIT_REPOSITORY https://github.com/valkey-io/valkey.git
