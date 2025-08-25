@@ -10,7 +10,7 @@
  * Design Considerations:
  * 1. All JSON CRUD operations should be delegated to the DOM module.
  * 2. Shared utility/helper code should reside in the UTIL module.
- * 3. When invoking a DOM or UTIL method tha returns a heap-allocated object, the caller must release the memory
+ * 3. When invoking a DOM or UTIL method the returns a heap-allocated object, the caller must release the memory
  *    after consuming it.
  * 4. The first line of every command handler should be: "ValkeyModule_AutoMemory(ctx);". This is for enabling
  *    auto memory management for the command.
@@ -1509,7 +1509,7 @@ STATIC void reply_arrpop(jsn::vector<rapidjson::StringBuffer> &vec, const bool i
     if (!is_v2_path) {
         // Legacy path: return a single value, which is the first value.
         for (auto it = vec.begin(); it != vec.end(); it++) {
-            if (it->GetLength() != 0) {  // emtpy indicates empty array or wrong type
+            if (it->GetLength() != 0) {  // empty indicates empty array or wrong type
                 ValkeyModule_ReplyWithStringBuffer(ctx, it->GetString(), it->GetLength());
                 return;
             }
@@ -1519,7 +1519,7 @@ STATIC void reply_arrpop(jsn::vector<rapidjson::StringBuffer> &vec, const bool i
         // JSONPath: return an array of lengths.
         ValkeyModule_ReplyWithArray(ctx, vec.size());
         for (auto it = vec.begin(); it != vec.end(); it++) {
-            if (it->GetLength() == 0) {  // emtpy indicates empty array or wrong type
+            if (it->GetLength() == 0) {  // empty indicates empty array or wrong type
                 ValkeyModule_ReplyWithNull(ctx);
             } else {
                 ValkeyModule_ReplyWithStringBuffer(ctx, it->GetString(), it->GetLength());
