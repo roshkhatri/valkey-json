@@ -446,6 +446,270 @@ TEST_F(DomTest, testGetObject) {
     "\"zipcode\":\"10021-3100\"}");
 }
 
+TEST_F(DomTest, testMergeValues_Basic) {
+    const char *existing_json = "{\"a\":1,\"b\":2}";
+    const char *new_json = "{\"b\":3,\"c\":4}";
+    
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("a"));
+    EXPECT_TRUE(merged.HasMember("b"));
+    EXPECT_TRUE(merged.HasMember("c"));
+    EXPECT_EQ(merged["a"].GetInt(), 1);
+    EXPECT_EQ(merged["b"].GetInt(), 3);
+    EXPECT_EQ(merged["c"].GetInt(), 4);
+    
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testMergeValues_Nested) {
+    const char *existing_json = "{\"user\":{\"name\":\"John\",\"age\":30}}";
+    const char *new_json = "{\"user\":{\"age\":31,\"email\":\"john@example.com\"}}";
+    
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("user"));
+    EXPECT_TRUE(merged["user"].IsObject());
+    EXPECT_TRUE(merged["user"].HasMember("name"));
+    EXPECT_TRUE(merged["user"].HasMember("age"));
+    EXPECT_TRUE(merged["user"].HasMember("email"));
+    EXPECT_STREQ(merged["user"]["name"].GetString(), "John");
+    EXPECT_EQ(merged["user"]["age"].GetInt(), 31);
+    EXPECT_STREQ(merged["user"]["email"].GetString(), "john@example.com");
+    
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testMergeValues_ReplaceNonObject) {
+    const char *existing_json = "{\"a\":1,\"b\":\"string\"}";
+    const char *new_json = "{\"b\":{\"nested\":\"object\"}}";
+    
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("a"));
+    EXPECT_TRUE(merged.HasMember("b"));
+    EXPECT_TRUE(merged["b"].IsObject());
+    EXPECT_STREQ(merged["b"]["nested"].GetString(), "object");
+    
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testMergeValues_NewKey) {
+    const char *existing_json = "{\"a\":1}";
+    const char *new_json = "{\"b\":2}";
+    
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("a"));
+    EXPECT_TRUE(merged.HasMember("b"));
+    EXPECT_EQ(merged["a"].GetInt(), 1);
+    EXPECT_EQ(merged["b"].GetInt(), 2);
+    
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testDomMergeValue_RootPath) {
+    const char *existing_json = "{\"a\":1,\"b\":2}";
+    const char *new_json = "{\"b\":3,\"c\":4}";
+    
+    JDocument *doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    rc = dom_merge_value(nullptr, doc, ".", new_json, strlen(new_json));
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    ReplyBuffer oss;
+    rc = dom_get_value_as_str(doc, ".", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    const char *result = GetString(&oss);
+    EXPECT_TRUE(strstr(result, "\"a\":1") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"b\":3") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"c\":4") != nullptr);
+    
+    dom_free_doc(doc);
+}
+
+TEST_F(DomTest, testDomMergeValue_NestedPath) {
+    const char *existing_json = "{\"user\":{\"name\":\"John\",\"age\":30},\"city\":\"NYC\"}";
+    const char *new_json = "{\"age\":31,\"email\":\"john@example.com\"}";
+    
+    JDocument *doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    rc = dom_merge_value(nullptr, doc, ".user", new_json, strlen(new_json));
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    ReplyBuffer oss;
+    rc = dom_get_value_as_str(doc, ".user", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    const char *result = GetString(&oss);
+    EXPECT_TRUE(strstr(result, "\"name\":\"John\"") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"age\":31") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"email\":\"john@example.com\"") != nullptr);
+    
+    Clear(&oss);
+    rc = dom_get_value_as_str(doc, ".city", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    EXPECT_STREQ(GetString(&oss), "\"NYC\"");
+    
+    dom_free_doc(doc);
+}
+
+TEST_F(DomTest, testDomMergeValue_CreateNewKey) {
+    const char *new_json = "{\"a\":1,\"b\":2}";
+    
+    JDocument *doc;
+    JsonUtilCode rc = dom_parse(nullptr, "{}", 2, &doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    rc = dom_merge_value(nullptr, doc, ".newkey", new_json, strlen(new_json));
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    ReplyBuffer oss;
+    rc = dom_get_value_as_str(doc, ".newkey", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    const char *result = GetString(&oss);
+    EXPECT_TRUE(strstr(result, "\"a\":1") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"b\":2") != nullptr);
+    
+    dom_free_doc(doc);
+}
+
+TEST_F(DomTest, testDomMergeValue_DeepNesting) {
+    const char *existing_json = "{\"level1\":{\"level2\":{\"level3\":{\"a\":1}}}}";
+    const char *new_json = "{\"level3\":{\"b\":2}}";
+    
+    JDocument *doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    rc = dom_merge_value(nullptr, doc, ".level1.level2", new_json, strlen(new_json));
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    ReplyBuffer oss;
+    rc = dom_get_value_as_str(doc, ".level1.level2.level3", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    const char *result = GetString(&oss);
+    EXPECT_TRUE(strstr(result, "\"a\":1") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"b\":2") != nullptr);
+    
+    dom_free_doc(doc);
+}
+
+TEST_F(DomTest, testDomMergeValue_NullDeletesKey) {
+    const char *existing_json = "{\"a\":1,\"b\":2,\"c\":3}";
+    const char *new_json = "{\"b\":null}";
+    
+    JDocument *doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    rc = dom_merge_value(nullptr, doc, ".", new_json, strlen(new_json));
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    ReplyBuffer oss;
+    rc = dom_get_value_as_str(doc, ".", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    const char *result = GetString(&oss);
+    // Key 'b' should be deleted
+    EXPECT_TRUE(strstr(result, "\"b\"") == nullptr);
+    // Keys 'a' and 'c' should remain
+    EXPECT_TRUE(strstr(result, "\"a\":1") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"c\":3") != nullptr);
+    
+    dom_free_doc(doc);
+}
+
+TEST_F(DomTest, testDomMergeValue_NullNestedDeletesKey) {
+    const char *existing_json = "{\"user\":{\"name\":\"John\",\"age\":30,\"email\":\"test@example.com\"}}";
+    const char *new_json = "{\"user\":{\"age\":null}}";
+    
+    JDocument *doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    rc = dom_merge_value(nullptr, doc, ".", new_json, strlen(new_json));
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    ReplyBuffer oss;
+    rc = dom_get_value_as_str(doc, ".user", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    const char *result = GetString(&oss);
+    // Key 'age' should be deleted
+    EXPECT_TRUE(strstr(result, "\"age\"") == nullptr);
+    // Keys 'name' and 'email' should remain
+    EXPECT_TRUE(strstr(result, "\"name\"") != nullptr);
+    EXPECT_TRUE(strstr(result, "\"email\"") != nullptr);
+    
+    dom_free_doc(doc);
+}
+
+TEST_F(DomTest, testDomMergeValue_NullNewKeyNotAdded) {
+    const char *existing_json = "{\"a\":1}";
+    const char *new_json = "{\"b\":null,\"c\":3}";
+    
+    JDocument *doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    rc = dom_merge_value(nullptr, doc, ".", new_json, strlen(new_json));
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    ReplyBuffer oss;
+    rc = dom_get_value_as_str(doc, ".", nullptr, oss, false);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    const char *result = GetString(&oss);
+    // Key 'b' should not be added (null on non-existing key)
+    EXPECT_TRUE(strstr(result, "\"b\"") == nullptr);
+    // Key 'c' should be added
+    EXPECT_TRUE(strstr(result, "\"c\":3") != nullptr);
+    // Original key 'a' should remain
+    EXPECT_TRUE(strstr(result, "\"a\":1") != nullptr);
+    
+    dom_free_doc(doc);
+}
+
 TEST_F(DomTest, testGetArray) {
     ReplyBuffer oss;
     JsonUtilCode rc = dom_get_value_as_str(doc1, ".phoneNumbers", nullptr, oss, false);

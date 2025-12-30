@@ -282,7 +282,24 @@ inline JsonUtilCode dom_set_value(ValkeyModuleCtx *ctx, JDocument *doc, const ch
     return dom_set_value(ctx, doc, json_path, new_val_json, strlen(new_val_json), is_create_only, is_update_only);
 }
 
+/* Merge value at the path.
+ * If the path exists and both existing and new values are objects, merge them recursively.
+ * If the path doesn't exist, create it with the new value.
+ * @param json_path: path that is compliant to the JSON Path syntax.
+ * @return JSONUTIL_SUCCESS for success, other code for failure.
+ */
+JsonUtilCode dom_merge_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *json_path, const char *new_val_json,
+                             size_t new_val_len);
 
+inline JsonUtilCode dom_merge_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *json_path, const char *new_val_json) {
+    return dom_merge_value(ctx, doc, json_path, new_val_json, strlen(new_val_json));
+}
+
+/* Merge two JValue objects recursively.
+ * If both are objects, merge their members recursively.
+ * Otherwise, return a copy of the new value.
+ */
+JValue merge_values(const JValue &existing, const JValue &new_val, RapidJsonAllocator &allocator, int depth = 0);
 
 /* Get JSON value at the path.
  * If the path is invalid, the method will return error code JSONUTIL_INVALID_JSON_PATH.

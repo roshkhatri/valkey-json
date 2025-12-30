@@ -4195,11 +4195,241 @@ class TestJsonBasic(JsonTestCase):
         assert b'[]' == client.execute_command(
             'JSON.GET', key, path)
 
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_basic(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_test'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"a":1,"b":2}')
+        assert b'{"a":1,"b":2}' == client.execute_command('JSON.GET', key)
+        
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"b":3,"c":4}')
+        assert b'{"a":1,"b":3,"c":4}' == client.execute_command('JSON.GET', key)
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_nested_objects(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_nested'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"user":{"name":"John","age":30},"city":"NYC"}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"user":{"age":31,"email":"john@example.com"},"country":"USA"}')
+        
+        result = client.execute_command('JSON.GET', key)
+        assert b'"John"' == client.execute_command('JSON.GET', key, '.user.name')
+        assert b'31' == client.execute_command('JSON.GET', key, '.user.age')
+        assert b'"john@example.com"' == client.execute_command('JSON.GET', key, '.user.email')
+        assert b'"NYC"' == client.execute_command('JSON.GET', key, '.city')
+        assert b'"USA"' == client.execute_command('JSON.GET', key, '.country')
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_path_merge(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_path'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"a":{"x":1,"y":2},"b":10}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.a', '{"y":3,"z":4}')
+        
+        assert b'{"x":1,"y":3,"z":4}' == client.execute_command('JSON.GET', key, '.a')
+        assert b'10' == client.execute_command('JSON.GET', key, '.b')
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_create_new_key(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_new_key'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"a":1,"b":2}')
+        assert b'{"a":1,"b":2}' == client.execute_command('JSON.GET', key)
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_replace_non_object(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_replace'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"a":1,"b":"string","c":true}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.b', '{"nested":"object"}')
+        
+        assert b'{"nested":"object"}' == client.execute_command('JSON.GET', key, '.b')
+        
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.c', '{"another":"object"}')
+        assert b'{"another":"object"}' == client.execute_command('JSON.GET', key, '.c')
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_deep_nesting(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_deep'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"level1":{"level2":{"level3":{"a":1}}}}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"level1":{"level2":{"level3":{"b":2}}}}')
+        
+        assert b'{"a":1,"b":2}' == client.execute_command('JSON.GET', key, '.level1.level2.level3')
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_root_path_merge(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_root'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"a":1,"b":2}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"b":3,"c":4}')
+        
+        assert b'{"a":1,"b":3,"c":4}' == client.execute_command('JSON.GET', key)
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_error_conditions(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_error'
+        
+        with pytest.raises(ResponseError):
+            client.execute_command('JSON.MERGE', key, '.invalid.path', '{"a":1}')
+        
+        with pytest.raises(ResponseError):
+            client.execute_command('JSON.MERGE', key, '.', 'invalid json')
+        
+        client.execute_command('SET', 'string_key', 'not_json')
+        with pytest.raises(ResponseError):
+            client.execute_command('JSON.MERGE', 'string_key', '.', '{"a":1}')
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_with_arrays(self):
+        client = self.server.get_new_client()
+        
+        key = 'merge_array'
+        
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"arr":[1,2,3]}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.arr', '{"merged":"object"}')
+        
+        assert b'{"merged":"object"}' == client.execute_command('JSON.GET', key, '.arr')
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_add_new_child(self):
+        """Test Rule 3: When path exists except for last element, add new child"""
+        client = self.server.get_new_client()
+        
+        key = 'merge_new_child'
+        
+        # Create document with nested structure
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"a":{"b":{"c":1}}}')
+        
+        # Path .a.b exists, but .a.b.d doesn't - should add 'd' as new child
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.a.b.d', '{"new":"value"}')
+        
+        # Verify the new child was added
+        assert b'{"new":"value"}' == client.execute_command('JSON.GET', key, '.a.b.d')
+        
+        # Verify original structure remains intact
+        assert b'1' == client.execute_command('JSON.GET', key, '.a.b.c')
+        
+        # Merge at existing nested path should work
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.a.b.d', '{"another":"field"}')
+        
+        # Both fields should now exist in .a.b.d
+        result = client.execute_command('JSON.GET', key, '.a.b.d')
+        assert b'new' in result and b'value' in result
+        assert b'another' in result and b'field' in result
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_null_deletes_key(self):
+        """Test value rule: Merging with null value deletes the key"""
+        client = self.server.get_new_client()
+        
+        key = 'merge_null'
+        
+        # Test 1: Delete key at root level
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"a":1,"b":2,"c":3}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"b":null}')
+        
+        result = client.execute_command('JSON.GET', key)
+        assert b'"b"' not in result
+        assert b'"a":1' in result or b'"a": 1' in result
+        assert b'"c":3' in result or b'"c": 3' in result
+        
+        # Test 2: Delete nested key
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"user":{"name":"John","age":30,"email":"test@example.com"}}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"user":{"age":null}}')
+        
+        user_result = client.execute_command('JSON.GET', key, '.user')
+        assert b'"age"' not in user_result
+        assert b'"name"' in user_result
+        assert b'"email"' in user_result
+        
+        # Test 3: Null on non-existing key should not add it
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"a":1}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', '{"b":null,"c":3}')
+        
+        result = client.execute_command('JSON.GET', key)
+        assert b'"b"' not in result
+        assert b'"c":3' in result or b'"c": 3' in result
+
+    @pytest.mark.timeout(10)
+    def test_json_merge_command_value_rules(self):
+        """Test all value merging rules comprehensively"""
+        client = self.server.get_new_client()
+        
+        key = 'merge_values'
+        
+        # Setup: Create initial document
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.', '{"str":"hello","num":42,"arr":[1,2,3],"obj":{"x":1}}')
+        
+        # Merge with various updates
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.', 
+            '{"str":"world","num":99,"arr":[4,5],"obj":{"y":2},"new":"added"}')
+        
+        # Verify string updated
+        assert b'"world"' == client.execute_command('JSON.GET', key, '.str')
+        
+        # Verify number updated
+        assert b'99' == client.execute_command('JSON.GET', key, '.num')
+        
+        # Verify array replaced (not merged)
+        assert b'[4,5]' == client.execute_command('JSON.GET', key, '.arr')
+        
+        # Verify object merged (x preserved, y added)
+        obj_result = client.execute_command('JSON.GET', key, '.obj')
+        assert b'"x":1' in obj_result or b'"x": 1' in obj_result
+        assert b'"y":2' in obj_result or b'"y": 2' in obj_result
+        
+        # Verify new key added
+        assert b'"added"' == client.execute_command('JSON.GET', key, '.new')
+
     def test_json_arity_per_command(self):
         client = self.server.get_new_client()
 
         # These commands should only get the single key
-        cmd_arity = [('SET', -4), ('GET', -2), ('MGET', -3), ('DEL', -2), ('FORGET', -2), ('NUMINCRBY', 4),
+        cmd_arity = [('SET', -4), ('MERGE', -4), ('GET', -2), ('MGET', -3), ('DEL', -2), ('FORGET', -2), ('NUMINCRBY', 4),
                      ('NUMMULTBY', 4), ('STRLEN', -2), ('STRAPPEND', -
                                                         3), ('TOGGLE', -2), ('OBJLEN', -2), ('OBJKEYS', -2),
                      ('ARRLEN', -2), ('ARRAPPEND', -4), ('ARRPOP', -

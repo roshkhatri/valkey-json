@@ -735,6 +735,94 @@ int Command_JsonSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
 }
 
+int Command_JsonMerge(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    ValkeyModule_AutoMemory(ctx);
+
+    // JSON.MERGE key path json
+    if (argc != 4) {
+        return ValkeyModule_WrongArity(ctx);
+    }
+
+    ValkeyModuleString *key = argv[1];
+    const char *path = ValkeyModule_StringPtrLen(argv[2], nullptr);
+    const char *json;
+    size_t json_len;
+    json = ValkeyModule_StringPtrLen(argv[3], &json_len);
+
+    // verify valkey keys
+    ValkeyModuleKey *key_obj = static_cast<ValkeyModuleKey*>(ValkeyModule_OpenKey(ctx, key,
+                                                                           VALKEYMODULE_READ | VALKEYMODULE_WRITE));
+    int type = ValkeyModule_KeyType(key_obj);
+    if (type != VALKEYMODULE_KEYTYPE_EMPTY && ValkeyModule_ModuleTypeGetType(key_obj) != DocumentType) {
+        return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(JSONUTIL_NOT_A_DOCUMENT_KEY));
+    }
+
+    bool is_new_valkey_key = (type == VALKEYMODULE_KEYTYPE_EMPTY);
+    bool is_root_path = jsonutil_is_root_path(path);
+
+    // begin tracking memory
+    int64_t begin_val = jsonstats_begin_track_mem();
+
+    if (is_new_valkey_key) {
+        if (!is_root_path) {
+            return ValkeyModule_ReplyWithError(ctx, ERRMSG_NEW_VALKEY_KEY_PATH_NOT_ROOT);
+        }
+        // For new key at root path, just parse and set (no merge needed)
+        JDocument *doc;
+        JsonUtilCode rc = dom_parse(ctx, json, json_len, &doc);
+        if (rc != JSONUTIL_SUCCESS) return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+
+        // end tracking memory
+        END_TRACKING_MEMORY(ctx, "JSON.MERGE", doc, 0, begin_val)
+
+        // set Valkey key
+        ValkeyModule_ModuleTypeSetValue(key_obj, DocumentType, doc);
+
+        // update stats
+        size_t new_doc_size = dom_get_doc_size(doc);
+        jsonstats_update_stats_on_insert(doc, true, 0, new_doc_size, new_doc_size);
+    } else {
+        // fetch doc object from Valkey dict
+        JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(key_obj));
+        if (doc == nullptr) return ValkeyModule_ReplyWithError(ctx, ERRMSG_JSON_DOCUMENT_NOT_FOUND);
+        size_t orig_doc_size = dom_get_doc_size(doc);
+
+        if (is_root_path) {
+            // For root path merge, use dom_merge_value which handles merging correctly
+            // This reuses the existing tested merge logic
+            JsonUtilCode rc = dom_merge_value(ctx, doc, ".", json, json_len);
+            if (rc != JSONUTIL_SUCCESS) {
+                return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+            }
+            
+            // dom_merge_value modifies the document in place
+            // end tracking memory
+            END_TRACKING_MEMORY(ctx, "JSON.MERGE", doc, orig_doc_size, begin_val)
+
+            // update stats
+            size_t new_doc_size = dom_get_doc_size(doc);
+            jsonstats_update_stats_on_update(doc, orig_doc_size, new_doc_size, json_len);
+        } else {
+            JsonUtilCode rc = dom_merge_value(ctx, doc, path, json, json_len);
+            if (rc != JSONUTIL_SUCCESS) {
+                return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
+            }
+
+            // end tracking memory
+            END_TRACKING_MEMORY(ctx, "JSON.MERGE", doc, orig_doc_size, begin_val)
+
+            // update stats
+            size_t new_doc_size = dom_get_doc_size(doc);
+            jsonstats_update_stats_on_update(doc, orig_doc_size, new_doc_size, json_len);
+        }
+    }
+
+    // replicate the command
+    ValkeyModule_ReplicateVerbatim(ctx);
+    ValkeyModule_NotifyKeyspaceEvent(ctx, VALKEYMODULE_NOTIFY_GENERIC, "json.merge", key);
+    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+}
+
 int Command_JsonMSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
     ValkeyModule_AutoMemory(ctx);
 
@@ -2713,6 +2801,16 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx) {
         return VALKEYMODULE_ERR;
     }
 
+    if (ValkeyModule_CreateCommand(ctx, "JSON.MERGE", Command_JsonMerge, cmdflg_slow_write_deny, 1, 1, 1)
+        == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "Failed to create command JSON.MERGE.");
+        return VALKEYMODULE_ERR;
+    }
+    if (ValkeyModule_SetCommandACLCategories(ValkeyModule_GetCommand(ctx,"JSON.MERGE"), cat_slow_write_deny) == VALKEYMODULE_ERR) {
+        ValkeyModule_Log(ctx, "warning", "Failed to set command category for JSON.MERGE.");
+        return VALKEYMODULE_ERR;
+    }
+
     if (ValkeyModule_CreateCommand(ctx, "JSON.MSET", Command_JsonMSet, cmdflg_slow_write_deny, 1, -3, 3)
         == VALKEYMODULE_ERR) {
         ValkeyModule_Log(ctx, "warning", "Failed to create command JSON.MSET.");
@@ -2981,6 +3079,9 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx) {
 
     // Commands under RW + Update
     if (!set_command_info(ctx, "JSON.SET", -4, ks_read_write_update, 1, std::make_tuple(0, 1, 0))) {
+        return VALKEYMODULE_ERR;
+    }
+    if (!set_command_info(ctx, "JSON.MERGE", -4, ks_read_write_update, 1, std::make_tuple(0, 1, 0))) {
         return VALKEYMODULE_ERR;
     }
     if (!set_command_info(ctx, "JSON.MSET", -4, ks_read_write_update, 1, std::make_tuple(-3, 3, 0))) {

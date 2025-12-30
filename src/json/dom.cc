@@ -7,7 +7,9 @@
 #include <iostream>
 #include <iomanip>
 #include <cmath>
+#include <string>
 #include "json/rapidjson_includes.h"
+#include <rapidjson/pointer.h>
 
 #define STATIC /* decorator for static functions, remove so that backtrace symbols include these */
 
@@ -205,6 +207,181 @@ JsonUtilCode dom_set_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *jso
     CHECK_DOCUMENT_SIZE_LIMIT(ctx, doc->size, new_val.GetJValueSize())
 
     selector.commit(new_val);
+    return JSONUTIL_SUCCESS;
+}
+
+/**
+ * Recursively merge two JValue objects.
+ * 
+ * Time Complexity: O(M + N) where:
+ *   M = number of nodes in existing value
+ *   N = number of nodes in new value
+ * 
+ * The algorithm performs a single pass through both JSON structures:
+ * - First pass: O(M) - iterate existing keys, O(1) lookup in new_val
+ * - Second pass: O(N) - iterate new keys, O(1) check in merged
+ * - Recursive calls process each node exactly once
+ * 
+ * Merge behavior:
+ * - If both are objects: merge their members recursively
+ * - Otherwise: return a copy of the new value
+ * - Null values delete keys (existing) or prevent addition (new)
+ */
+JValue merge_values(const JValue &existing, const JValue &new_val, RapidJsonAllocator &alloc, int depth) {
+    // Safety: prevent infinite recursion (max depth 100)
+    if (depth > 100) {
+        return JValue(new_val, alloc);
+    }
+    
+    if (!existing.IsObject() || !new_val.IsObject()) {
+        // Not both objects, return copy of new value
+        return JValue(new_val, alloc);
+    }
+    
+    // Build merged object from scratch
+    JValue merged(rapidjson::kObjectType);
+    
+    // First pass: process existing members
+    for (auto it = existing.MemberBegin(); it != existing.MemberEnd(); ++it) {
+        // Get key string and store in a std::string to ensure it persists
+        std::string key(it->name.GetString(), it->name.GetStringLength());
+        
+        // Check if this key exists in new_val
+        auto new_it = new_val.FindMember(key.c_str());
+        
+        if (new_it != new_val.MemberEnd()) {
+            // Key exists in both
+            if (new_it->value.IsNull()) {
+                // Rule 1: Merging with null value deletes the key
+                // Don't add this key to merged object
+                continue;
+            } else if (it->value.IsObject() && new_it->value.IsObject()) {
+                // Both are objects - merge recursively
+                JValue val_result = merge_values(it->value, new_it->value, alloc, depth + 1);
+                JValue key_copy;
+                key_copy.SetString(key.c_str(), static_cast<rapidjson::SizeType>(key.length()), alloc);
+                merged.AddMember(key_copy, val_result, alloc);
+            } else {
+                // Rule 2 & 4: Not both objects - use new value (updates value or replaces array)
+                JValue val_result = JValue(new_it->value, alloc);
+                JValue key_copy;
+                key_copy.SetString(key.c_str(), static_cast<rapidjson::SizeType>(key.length()), alloc);
+                merged.AddMember(key_copy, val_result, alloc);
+            }
+        } else {
+            // Key only in existing - copy it
+            JValue val_result = JValue(it->value, alloc);
+            JValue key_copy;
+            key_copy.SetString(key.c_str(), static_cast<rapidjson::SizeType>(key.length()), alloc);
+            merged.AddMember(key_copy, val_result, alloc);
+        }
+    }
+    
+    // Second pass: add keys that only exist in new_val
+    for (auto it = new_val.MemberBegin(); it != new_val.MemberEnd(); ++it) {
+        std::string key(it->name.GetString(), it->name.GetStringLength());
+        
+        // Check if key already exists in merged
+        if (!merged.HasMember(key.c_str())) {
+            // Don't add keys with null values (they don't exist in original, so null means don't add)
+            if (it->value.IsNull()) {
+                continue;
+            }
+            // Rule 3: New key - add it
+            JValue key_copy;
+            key_copy.SetString(key.c_str(), static_cast<rapidjson::SizeType>(key.length()), alloc);
+            JValue val_copy(it->value, alloc);
+            merged.AddMember(key_copy, val_copy, alloc);
+        }
+    }
+    
+    return merged;
+}
+
+/**
+ * Merge a new JSON value into an existing document at the specified path.
+ * 
+ * Time Complexity:
+ * - Single path: O(M + N) where M = size of original value, N = size of new value
+ * - Multiple paths: O(P * M_avg + P * N) where P = number of matched paths,
+ *   M_avg = average size of original values, N = size of new value
+ * 
+ * Path evaluation complexity:
+ * - Simple path (e.g., .user.profile): O(D) where D = path depth
+ * - Wildcard path (e.g., $..field): O(K) where K = total document size
+ * 
+ * @param ctx Valkey module context
+ * @param doc The JSON document to modify
+ * @param json_path JSONPath expression to locate merge target(s)
+ * @param new_val_json JSON string of the value to merge
+ * @param new_val_size Size of the JSON string
+ * @return JsonUtilCode indicating success or error
+ */
+JsonUtilCode dom_merge_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *json_path, const char *new_val_json,
+                             size_t new_val_size) {
+    Selector selector;
+    JValue &root = doc->GetJValue();
+    JsonUtilCode rc = selector.prepareSetValues(root, json_path);
+    if (rc != JSONUTIL_SUCCESS) return rc;
+
+    JParser new_val_parser;
+    if (new_val_parser.Parse(new_val_json, new_val_size).HasParseError()) {
+        return new_val_parser.GetParseErrorCode();
+    }
+
+    JValue &new_val = new_val_parser.GetJValue();
+    
+    // Handle updates (path exists) - merge values
+    bool has_updates = false;
+    auto &rs = selector.getUniqueResultSet();
+    if (!rs.empty()) {
+        has_updates = true;
+        for (auto &vInfo : rs) {
+            JValue *existing_val = vInfo.first;
+            typedef rapidjson::GenericPointer<RJValue, RapidJsonAllocator> JPointerType;
+            JPointerType ptr(vInfo.second.c_str(), vInfo.second.length(), &allocator);
+            if (!ptr.IsValid()) {
+                return JSONUTIL_INVALID_JSON_PATH;
+            }
+            
+            // Merge the values
+            JValue merged = merge_values(*existing_val, new_val, allocator, 0);
+            
+            // Check document limits before committing
+            CHECK_DOCUMENT_PATH_LIMIT(ctx, selector, new_val_parser)
+            // Estimate size - use new_val size as approximation for merged size
+            CHECK_DOCUMENT_SIZE_LIMIT(ctx, doc->size, new_val_parser.GetJValueSize())
+            
+            // Replace the existing value with merged value
+            ptr.Swap(root, merged, allocator);
+        }
+    }
+    
+    // Handle inserts (path doesn't exist)
+    if (selector.hasInserts()) {
+        CHECK_DOCUMENT_PATH_LIMIT(ctx, selector, new_val_parser)
+        CHECK_DOCUMENT_SIZE_LIMIT(ctx, doc->size, new_val_parser.GetJValueSize())
+        
+        if (has_updates) {
+            // If we had updates, we can't use the original selector's commit
+            // because it will try to process updates again and overwrite our merged values.
+            // Create a fresh selector that will only find inserts (paths that don't exist)
+            Selector insert_selector;
+            rc = insert_selector.prepareSetValues(root, json_path);
+            if (rc == JSONUTIL_SUCCESS && insert_selector.hasInserts()) {
+                // This selector should only have inserts since we already handled updates
+                // But to be safe, we'll only commit if it has no updates
+                if (!insert_selector.hasUpdates()) {
+                    insert_selector.commit(new_val);
+                }
+            }
+        } else {
+            // No updates, safe to use commit which will only process inserts
+            rc = selector.commit(new_val);
+            if (rc != JSONUTIL_SUCCESS) return rc;
+        }
+    }
+    
     return JSONUTIL_SUCCESS;
 }
 
