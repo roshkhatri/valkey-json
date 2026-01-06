@@ -227,11 +227,22 @@ JsonUtilCode dom_set_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *jso
  * - Otherwise: return a copy of the new value
  * - Null values delete keys (existing) or prevent addition (new)
  */
-JValue merge_values(const JValue &existing, const JValue &new_val, RapidJsonAllocator &alloc, int depth) {
+JValue merge_values(const JValue &existing, const JValue &new_v al, RapidJsonAllocator &alloc, int depth) {
+    if (existing.ObjectEmpty()) {
+        // Nothing to merge into – just return a deep copy of new_val
+        return JValue(new_val, alloc);
+    }
+    
+    if (new_val.ObjectEmpty()) {
+        // Patch is empty – return a deep copy of existing
+        return JValue(existing, alloc);
+    }
+
     // Safety: prevent infinite recursion (max depth from config)
     if (depth > static_cast<int>(json_get_max_path_limit())) {
         return JValue(new_val, alloc);
     }
+
     
     if (!existing.IsObject() || !new_val.IsObject()) {
         // Not both objects, return copy of new value
