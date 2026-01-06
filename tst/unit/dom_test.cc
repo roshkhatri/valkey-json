@@ -17,6 +17,7 @@
 #include "json/alloc.h"
 #include "json/stats.h"
 #include "json/selector.h"
+#include "json/json.h"
 #include "module_sim.h"
 
 jsn::string& getReplyString() {
@@ -708,6 +709,97 @@ TEST_F(DomTest, testDomMergeValue_NullNewKeyNotAdded) {
     EXPECT_TRUE(strstr(result, "\"a\":1") != nullptr);
     
     dom_free_doc(doc);
+}
+
+TEST_F(DomTest, testMergeValues_DepthLimit) {
+    size_t max_depth = json_get_max_path_limit();
+    
+    std::string existing_json = "{";
+    std::string new_json = "{";
+    
+    for (size_t i = 0; i < max_depth - 1; ++i) {
+        std::string key = "level" + std::to_string(i);
+        existing_json += "\"" + key + "\":{";
+        new_json += "\"" + key + "\":{";
+    }
+    
+    existing_json += "\"value\":1";
+    new_json += "\"value\":2";
+    
+    for (size_t i = 0; i < max_depth - 1; ++i) {
+        existing_json += "}";
+        new_json += "}";
+    }
+    existing_json += "}";
+    new_json += "}";
+    
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json.c_str(), existing_json.length(), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    JParser new_parser;
+    new_parser.Parse(new_json.c_str(), new_json.length());
+    EXPECT_FALSE(new_parser.HasParseError());
+    
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    
+    JValue *current = &merged;
+    for (size_t i = 0; i < max_depth - 1; ++i) {
+        std::string key = "level" + std::to_string(i);
+        EXPECT_TRUE(current->HasMember(key.c_str()));
+        current = &(*current)[key.c_str()];
+        EXPECT_TRUE(current->IsObject());
+    }
+    EXPECT_TRUE(current->HasMember("value"));
+    EXPECT_EQ(current->GetInt(), 2);
+    
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testMergeValues_DepthLimitExceeded) {
+    size_t max_depth = json_get_max_path_limit();
+    
+    std::string existing_json = "{";
+    std::string new_json = "{";
+    
+    for (size_t i = 0; i < max_depth + 1; ++i) {
+        std::string key = "level" + std::to_string(i);
+        existing_json += "\"" + key + "\":{";
+        new_json += "\"" + key + "\":{";
+    }
+    
+    existing_json += "\"value\":1";
+    new_json += "\"value\":2";
+    
+    for (size_t i = 0; i < max_depth + 1; ++i) {
+        existing_json += "}";
+        new_json += "}";
+    }
+    existing_json += "}";
+    new_json += "}";
+    
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json.c_str(), existing_json.length(), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    
+    JParser new_parser;
+    new_parser.Parse(new_json.c_str(), new_json.length());
+    EXPECT_FALSE(new_parser.HasParseError());
+    
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    
+    JValue *current = &merged;
+    for (size_t i = 0; i < max_depth + 1; ++i) {
+        std::string key = "level" + std::to_string(i);
+        EXPECT_TRUE(current->HasMember(key.c_str()));
+        current = &(*current)[key.c_str()];
+        EXPECT_TRUE(current->IsObject());
+    }
+    EXPECT_TRUE(current->HasMember("value"));
+    EXPECT_EQ(current->GetInt(), 2);
+    
+    dom_free_doc(existing_doc);
 }
 
 TEST_F(DomTest, testGetArray) {

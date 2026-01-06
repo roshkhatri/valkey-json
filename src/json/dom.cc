@@ -228,8 +228,8 @@ JsonUtilCode dom_set_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *jso
  * - Null values delete keys (existing) or prevent addition (new)
  */
 JValue merge_values(const JValue &existing, const JValue &new_val, RapidJsonAllocator &alloc, int depth) {
-    // Safety: prevent infinite recursion (max depth 100)
-    if (depth > 100) {
+    // Safety: prevent infinite recursion (max depth from config)
+    if (depth > static_cast<int>(json_get_max_path_limit())) {
         return JValue(new_val, alloc);
     }
     
