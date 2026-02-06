@@ -211,42 +211,32 @@ JsonUtilCode dom_set_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *jso
 }
 
 /**
- * Recursively merge two JValue objects.
- * 
- * Time Complexity: O(M + N) where:
- *   M = number of nodes in existing value
- *   N = number of nodes in new value
- * 
- * The algorithm performs a single pass through both JSON structures:
- * - First pass: O(M) - iterate existing keys, O(1) lookup in new_val
- * - Second pass: O(N) - iterate new keys, O(1) check in merged
- * - Recursive calls process each node exactly once
- * 
- * Merge behavior:
- * - If both are objects: merge their members recursively
- * - Otherwise: return a copy of the new value
- * - Null values delete keys (existing) or prevent addition (new)
+ * Recursively merge two JValue objects per RFC 7396 (JSON Merge Patch).
+ *
+ * MergePatch(Target, Patch) semantics:
+ * - If Patch is an object: if Target is not an object, treat Target as {};
+ *   then for each name/value in Patch, null removes the key, else
+ *   Target[name] = MergePatch(Target[name], value). Return Target.
+ * - Otherwise: return Patch (replace entire target).
+ *
+ * Time Complexity: O(M + N). Null values in the patch delete keys.
  */
 JValue merge_values(const JValue &existing, const JValue &new_val, RapidJsonAllocator &alloc, int depth) {
-    if (existing.IsObject() && existing.ObjectEmpty()) {
-        // Nothing to merge into – just return a deep copy of new_val
-        return JValue(new_val, alloc);
-    }
-    
-    if (new_val.ObjectEmpty()) {
-        // Patch is empty – return a deep copy of existing
-        return JValue(existing, alloc);
-    }
-
-    // Safety: prevent infinite recursion (max depth from config)
     if (depth > static_cast<int>(json_get_max_path_limit())) {
         return JValue(new_val, alloc);
     }
 
-    
-    if (!existing.IsObject() || !new_val.IsObject()) {
-        // Not both objects, return copy of new value
+    if (!new_val.IsObject()) {
         return JValue(new_val, alloc);
+    }
+
+    if (new_val.ObjectEmpty()) {
+        return JValue(existing, alloc);
+    }
+
+    if (!existing.IsObject()) {
+        JValue empty_obj(rapidjson::kObjectType);
+        return merge_values(empty_obj, new_val, alloc, depth);
     }
     
     // Build merged object from scratch
@@ -288,21 +278,19 @@ JValue merge_values(const JValue &existing, const JValue &new_val, RapidJsonAllo
         }
     }
     
-    // Second pass: add keys that only exist in new_val
+    // Second pass: add keys that only exist in new_val (Target[Name] = MergePatch(undefined, Value))
+    JValue empty_obj(rapidjson::kObjectType);
     for (auto it = new_val.MemberBegin(); it != new_val.MemberEnd(); ++it) {
         std::string key(it->name.GetString(), it->name.GetStringLength());
         
-        // Check if key already exists in merged
         if (!merged.HasMember(key.c_str())) {
-            // Don't add keys with null values (they don't exist in original, so null means don't add)
             if (it->value.IsNull()) {
                 continue;
             }
-            // Rule 3: New key - add it
             JValue key_copy;
             key_copy.SetString(key.c_str(), static_cast<rapidjson::SizeType>(key.length()), alloc);
-            JValue val_copy(it->value, alloc);
-            merged.AddMember(key_copy, val_copy, alloc);
+            JValue val_result = merge_values(empty_obj, it->value, alloc, depth + 1);
+            merged.AddMember(key_copy, val_result, alloc);
         }
     }
     
@@ -374,20 +362,11 @@ JsonUtilCode dom_merge_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *j
         CHECK_DOCUMENT_SIZE_LIMIT(ctx, doc->size, new_val_parser.GetJValueSize())
         
         if (has_updates) {
-            // If we had updates, we can't use the original selector's commit
-            // because it will try to process updates again and overwrite our merged values.
-            // Create a fresh selector that will only find inserts (paths that don't exist)
-            Selector insert_selector;
-            rc = insert_selector.prepareSetValues(root, json_path);
-            if (rc == JSONUTIL_SUCCESS && insert_selector.hasInserts()) {
-                // This selector should only have inserts since we already handled updates
-                // But to be safe, we'll only commit if it has no updates
-                if (!insert_selector.hasUpdates()) {
-                    insert_selector.commit(new_val);
-                }
-            }
+            // Updates were already applied above. Apply only the insert paths from the
+            // original prepareSetValues (a second prepareSetValues would find updates again).
+            rc = selector.commitInsertsOnly(new_val);
+            if (rc != JSONUTIL_SUCCESS) return rc;
         } else {
-            // No updates, safe to use commit which will only process inserts
             rc = selector.commit(new_val);
             if (rc != JSONUTIL_SUCCESS) return rc;
         }

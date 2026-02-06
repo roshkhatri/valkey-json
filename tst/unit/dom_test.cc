@@ -1076,6 +1076,76 @@ TEST_F(DomTest, testMergeValues_NonObjectToObject) {
     dom_free_doc(existing_doc);
 }
 
+TEST_F(DomTest, testMergeValues_RFC7396_NonObjectTargetPatchObjectWithNull) {
+    const char *existing_json = "[1,2]";
+    const char *new_json = "{\"a\":\"b\",\"c\":null}";
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("a"));
+    EXPECT_TRUE(merged["a"].IsString());
+    EXPECT_EQ(merged["a"].GetStringLength(), size_t(1));
+    EXPECT_EQ(std::string(merged["a"].GetString(), merged["a"].GetStringLength()), "b");
+    EXPECT_FALSE(merged.HasMember("c"));
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testMergeValues_RFC7396_PatchNullReplacesTarget) {
+    const char *existing_json = "{\"a\":\"foo\"}";
+    const char *new_json = "null";
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsNull());
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testMergeValues_RFC7396_EmptyTargetNestedNullRemoval) {
+    const char *existing_json = "{}";
+    const char *new_json = "{\"a\":{\"bb\":{\"ccc\":null}}}";
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("a"));
+    EXPECT_TRUE(merged["a"].IsObject());
+    EXPECT_TRUE(merged["a"].HasMember("bb"));
+    EXPECT_TRUE(merged["a"]["bb"].IsObject());
+    EXPECT_FALSE(merged["a"]["bb"].HasMember("ccc"));
+    dom_free_doc(existing_doc);
+}
+
+TEST_F(DomTest, testMergeValues_RFC7396_TargetNullPreservedPatchAddsKey) {
+    const char *existing_json = "{\"e\":null}";
+    const char *new_json = "{\"a\":1}";
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("e"));
+    EXPECT_TRUE(merged["e"].IsNull());
+    EXPECT_TRUE(merged.HasMember("a"));
+    EXPECT_EQ(merged["a"].GetInt(), 1);
+    dom_free_doc(existing_doc);
+}
+
 TEST_F(DomTest, testMergeValues_DeepNesting) {
     const char *existing_json = "{\"level1\":{\"level2\":{\"level3\":{\"a\":1}}}}";
     const char *new_json = "{\"level1\":{\"level2\":{\"level3\":{\"b\":2}}}}";

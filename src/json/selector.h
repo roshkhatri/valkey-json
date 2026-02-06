@@ -195,6 +195,11 @@ class Selector {
      * Commit a 2-stage INSERT/UPDATE.
      */
     JsonUtilCode commit(JValue &new_val);
+    /**
+     * Commit only the insert paths from a prior prepareSetValues (no updates).
+     * Used when updates were already applied separately (e.g. JSON.MERGE).
+     */
+    JsonUtilCode commitInsertsOnly(JValue &new_val);
     bool isLegacyJsonPathSyntax() const { return !isV2Path; }
     bool isSyntaxError(JsonUtilCode code) const;
 

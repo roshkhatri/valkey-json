@@ -4501,6 +4501,22 @@ class TestJsonBasic(JsonTestCase):
         assert b'"email":"new@example.com"' in user2_profile or b'"email": "new@example.com"' in user2_profile
 
     @pytest.mark.timeout(10)
+    def test_json_merge_command_updates_and_inserts_together(self):
+        client = self.server.get_new_client()
+        key = 'merge_updates_inserts'
+        assert b'OK' == client.execute_command(
+            'JSON.SET', key, '.',
+            '{"users":[{"id":1,"profile":{"email":"a@x.com"}},{"id":2}]}')
+        assert b'OK' == client.execute_command(
+            'JSON.MERGE', key, '.users[*].profile', '{"phone":"123"}')
+        profile0 = client.execute_command('JSON.GET', key, '.users[0].profile')
+        assert b'"email"' in profile0 and (b'"email":"a@x.com"' in profile0 or b'"email": "a@x.com"' in profile0)
+        assert b'"phone"' in profile0 and (b'"phone":"123"' in profile0 or b'"phone": "123"' in profile0)
+        profile1 = client.execute_command('JSON.GET', key, '.users[1].profile')
+        assert b'"phone"' in profile1 and (b'"phone":"123"' in profile1 or b'"phone": "123"' in profile1)
+        assert b'2' == client.execute_command('JSON.GET', key, '.users[1].id')
+
+    @pytest.mark.timeout(10)
     def test_json_merge_command_non_root_path_new_key_error(self):
         """Test that non-root path on new key throws error"""
         client = self.server.get_new_client()
@@ -4569,7 +4585,7 @@ class TestJsonBasic(JsonTestCase):
         client = self.server.get_new_client()
 
         # These commands should only get the single key
-        cmd_arity = [('SET', -4), ('MERGE', -4), ('GET', -2), ('MGET', -3), ('DEL', -2), ('FORGET', -2), ('NUMINCRBY', 4),
+        cmd_arity = [('SET', -4), ('MERGE', 4), ('GET', -2), ('MGET', -3), ('DEL', -2), ('FORGET', -2), ('NUMINCRBY', 4),
                      ('NUMMULTBY', 4), ('STRLEN', -2), ('STRAPPEND', -
                                                         3), ('TOGGLE', -2), ('OBJLEN', -2), ('OBJKEYS', -2),
                      ('ARRLEN', -2), ('ARRAPPEND', -4), ('ARRPOP', -
