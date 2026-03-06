@@ -320,40 +320,32 @@ JsonUtilCode dom_merge_value(ValkeyModuleCtx *ctx, JDocument *doc, const char *j
 
     JValue &new_val = new_val_parser.GetJValue();
     
-    // Handle updates (path exists) - merge values
     bool has_updates = false;
     auto &rs = selector.getUniqueResultSet();
     if (!rs.empty()) {
         has_updates = true;
         for (auto &vInfo : rs) {
             JValue *existing_val = vInfo.first;
-            typedef rapidjson::GenericPointer<RJValue, RapidJsonAllocator> JPointerType;
+            using JPointerType = rapidjson::GenericPointer<RJValue, RapidJsonAllocator>;
             JPointerType ptr(vInfo.second.c_str(), vInfo.second.length(), &allocator);
             if (!ptr.IsValid()) {
                 return JSONUTIL_INVALID_JSON_PATH;
             }
             
-            // Merge the values
             JValue merged = merge_values(*existing_val, new_val, allocator, 0);
             
-            // Check document limits before committing
             CHECK_DOCUMENT_PATH_LIMIT(ctx, selector, new_val_parser)
-            // Estimate size - use new_val size as approximation for merged size
             CHECK_DOCUMENT_SIZE_LIMIT(ctx, doc->size, new_val_parser.GetJValueSize())
             
-            // Replace the existing value with merged value
             ptr.Swap(root, merged, allocator);
         }
     }
     
-    // Handle inserts (path doesn't exist)
     if (selector.hasInserts()) {
         CHECK_DOCUMENT_PATH_LIMIT(ctx, selector, new_val_parser)
         CHECK_DOCUMENT_SIZE_LIMIT(ctx, doc->size, new_val_parser.GetJValueSize())
         
         if (has_updates) {
-            // Updates were already applied above. Apply only the insert paths from the
-            // original prepareSetValues (a second prepareSetValues would find updates again).
             rc = selector.commitInsertsOnly(new_val);
             if (rc != JSONUTIL_SUCCESS) return rc;
         } else {
@@ -377,7 +369,6 @@ STATIC void PutEscapedString(OutputBuffer& oss, const char *str) {
     serialize_value(tmp, 0, nullptr, oss);
 }
 
-// Build stringified JSON array directly from a vector of values.
 template<typename T>
 STATIC void build_json_array(const jsn::vector<JValue*> &values, const PrintFormat *format, T &oss) {
     bool has_format = has_custom_format(format);
@@ -403,36 +394,29 @@ JsonUtilCode dom_get_value_as_str(JDocument *doc, const char *json_path, const P
     JsonUtilCode rc = selector.getValues(*doc, json_path);
     if (rc != JSONUTIL_SUCCESS) {
         if (selector.isLegacyJsonPathSyntax()) return rc;
-        // For v2 path, return error code only if it's a syntax error.
         if (selector.isSyntaxError(rc)) return rc;
     }
 
     jsn::vector<JValue*> values;
     selector.getSelectedValues(values);
 
-    // If legacy path, return either the first value, or NONEXISTENT error if no value is found.
     if (selector.isLegacyJsonPathSyntax()) {
         if (values.empty()) {
             return JSONUTIL_JSON_PATH_NOT_EXIST;
         } else {
             serialize_value(*values[0], 0, format, oss);
-            // update stats
             if (update_stats) jsonstats_update_stats_on_read(oss.GetLength());
             return JSONUTIL_SUCCESS;
         }
     }
 
-    // v2 path: return an array of values.
     if (values.empty()) {
-        // return an empty array
         oss.Put('[');
         oss.Put(']');
     } else {
-        // Multiple values are returned to the client as a JSON array.
         build_json_array(values, format, oss);
     }
 
-    // update stats
     if (update_stats) jsonstats_update_stats_on_read(oss.GetLength());
     return JSONUTIL_SUCCESS;
 }
