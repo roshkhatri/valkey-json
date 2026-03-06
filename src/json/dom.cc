@@ -230,13 +230,13 @@ JValue merge_values(const JValue &existing, const JValue &new_val, RapidJsonAllo
         return JValue(new_val, alloc);
     }
 
-    if (new_val.ObjectEmpty()) {
-        return JValue(existing, alloc);
-    }
-
     if (!existing.IsObject()) {
         JValue empty_obj(rapidjson::kObjectType);
         return merge_values(empty_obj, new_val, alloc, depth);
+    }
+
+    if (new_val.ObjectEmpty()) {
+        return JValue(existing, alloc);
     }
     
     // Build merged object from scratch

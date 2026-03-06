@@ -1128,6 +1128,23 @@ TEST_F(DomTest, testMergeValues_RFC7396_EmptyTargetNestedNullRemoval) {
     dom_free_doc(existing_doc);
 }
 
+TEST_F(DomTest, testMergeValues_RFC7396_PatchObjectReplacesArrayAtKey) {
+    const char *existing_json = "{\"foo\":[\"bar\",\"baz\"]}";
+    const char *new_json = "{\"foo\":{}}";
+    JDocument *existing_doc;
+    JsonUtilCode rc = dom_parse(nullptr, existing_json, strlen(existing_json), &existing_doc);
+    EXPECT_EQ(rc, JSONUTIL_SUCCESS);
+    JParser new_parser;
+    new_parser.Parse(new_json, strlen(new_json));
+    EXPECT_FALSE(new_parser.HasParseError());
+    JValue merged = merge_values(existing_doc->GetJValue(), new_parser.GetJValue(), allocator);
+    EXPECT_TRUE(merged.IsObject());
+    EXPECT_TRUE(merged.HasMember("foo"));
+    EXPECT_TRUE(merged["foo"].IsObject());
+    EXPECT_TRUE(merged["foo"].ObjectEmpty());
+    dom_free_doc(existing_doc);
+}
+
 TEST_F(DomTest, testMergeValues_RFC7396_TargetNullPreservedPatchAddsKey) {
     const char *existing_json = "{\"e\":null}";
     const char *new_json = "{\"a\":1}";
