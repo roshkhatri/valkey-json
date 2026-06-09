@@ -749,47 +749,70 @@ int Command_JsonMSet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) 
             return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(rc));
     }
 
-    // Apply changes
+    // Apply changes with fail-fast: stop at first failure to avoid assert on
+    // duplicate-key conflicts where an earlier op changes the document shape.
+    size_t applied_count = 0;
+    JsonUtilCode err = JSONUTIL_SUCCESS;
     size_t i;
     for (i = 0; i < num_keys; i++) {
-        // begin tracking memory
         int64_t begin_val = jsonstats_begin_track_mem();
 
-        if (args_list[i].is_root_path) { // Root document
-            // parse incoming JSON string
+        if (args_list[i].is_root_path) {
             JDocument *doc;
             rc = dom_parse(ctx, args_list[i].json, args_list[i].json_len, &doc);
-            ValkeyModule_Assert(rc == JSONUTIL_SUCCESS);
+            if (rc != JSONUTIL_SUCCESS) {
+                err = rc;
+                jsonstats_end_track_mem(begin_val);
+                break;
+            }
 
             int64_t delta = jsonstats_end_track_mem(begin_val);
             size_t doc_size = dom_get_doc_size(doc) + delta;
             dom_set_doc_size(doc, doc_size);
 
-            // Set Valkey key
             ValkeyModule_ModuleTypeSetValue(args_list[i].key, DocumentType, doc);
-            // update stats
             jsonstats_update_stats_on_insert(doc, true, 0, doc_size, doc_size);
-        } else { // Update existing document
+        } else {
             JDocument *doc = static_cast<JDocument*>(ValkeyModule_ModuleTypeGetValue(args_list[i].key));
+            if (!doc) {
+                err = JSONUTIL_DOCUMENT_KEY_NOT_FOUND;
+                jsonstats_end_track_mem(begin_val);
+                break;
+            }
             size_t orig_doc_size = dom_get_doc_size(doc);
 
             rc = dom_set_value(ctx, doc, args_list[i].path, args_list[i].json, args_list[i].json_len, false, false);
-            ValkeyModule_Assert(rc == JSONUTIL_SUCCESS);
+            if (rc != JSONUTIL_SUCCESS) {
+                err = rc;
+                jsonstats_end_track_mem(begin_val);
+                break;
+            }
             int64_t delta = jsonstats_end_track_mem(begin_val);
             size_t new_doc_size = dom_get_doc_size(doc) + delta;
             dom_set_doc_size(doc, new_doc_size);
 
-            // update stats
             jsonstats_update_stats_on_update(doc, orig_doc_size, new_doc_size, args_list[i].json_len);
         }
 
         ValkeyModule_NotifyKeyspaceEvent(ctx, VALKEYMODULE_NOTIFY_GENERIC, "json.mset", args_list[i].key_str);
+        applied_count++;
     }
 
-    // replicate the entire command
-    ValkeyModule_ReplicateVerbatim(ctx);
+    if (err == JSONUTIL_SUCCESS) {
+        // All ops applied successfully
+        ValkeyModule_ReplicateVerbatim(ctx);
+        ValkeyModule_Free(args_list);
+        return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+    }
+
+    // Partial failure: replicate only the applied prefix explicitly
+    for (i = 0; i < applied_count; i++) {
+        ValkeyModule_Replicate(ctx, "JSON.SET", "scb",
+                              args_list[i].key_str, args_list[i].path,
+                              args_list[i].json, args_list[i].json_len);
+    }
     ValkeyModule_Free(args_list);
-    return ValkeyModule_ReplyWithSimpleString(ctx, "OK");
+    return ValkeyModule_ReplyWithError(ctx, jsonutil_code_to_message(err));
 }
 
 int Command_JsonGet(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {

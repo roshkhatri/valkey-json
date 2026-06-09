@@ -2948,6 +2948,55 @@ class TestJsonBasic(JsonTestCase):
             assert value.encode() == client.execute_command(
                 'JSON.GET', key, path)
 
+    def test_json_mset_duplicate_key_failfast_repro1(self):
+        """Issue #106 repro: MSET replaces root then uses stale path on same key."""
+        client = self.server.get_new_client()
+        dk = 'dk'
+        client.execute_command('JSON.SET', dk, '$', '{"a":1}')
+        # Op1 replaces root with array, op2 references .a which no longer exists
+        with pytest.raises(ResponseError) as e:
+            client.execute_command('JSON.MSET', dk, '$', '[1,2,3]', dk, '.a', '99')
+        assert self.error_class.is_write_error(str(e.value))
+        # Server alive
+        assert client.execute_command('PING')
+        # Op1 (root replace) was applied before the failure
+        assert b'[1,2,3]' == client.execute_command('JSON.GET', dk, '.')
+
+    def test_json_mset_duplicate_key_failfast_repro2(self):
+        """Issue #106 repro: MSET changes nested object then uses deeper path."""
+        client = self.server.get_new_client()
+        dk = 'dk'
+        client.execute_command('JSON.SET', dk, '$', '{"a":{"x":1}}')
+        # Op1 replaces .a with array, op2 references .a.x which no longer exists
+        with pytest.raises(ResponseError) as e:
+            client.execute_command('JSON.MSET', dk, '.a', '[9]', dk, '.a.x', '5')
+        assert self.error_class.is_write_error(str(e.value))
+        assert client.execute_command('PING')
+        # Op1 was applied
+        assert b'[9]' == client.execute_command('JSON.GET', dk, '.a')
+
+    def test_json_mset_duplicate_key_failfast_3ops(self):
+        """3-op fail-fast: op1 ok, op2 conflicts, op3 should NOT be applied."""
+        client = self.server.get_new_client()
+        dk = 'dk'
+        k = 'mset3opk'
+        client.execute_command('JSON.SET', dk, '$', '{"a":1}')
+        client.execute_command('JSON.SET', k, '$', '{"v":0}')
+        # Op1: replace dk root (ok)
+        # Op2: set dk .a (conflicts - path gone after op1)
+        # Op3: update k .v (should NOT run - we stopped at op2)
+        with pytest.raises(ResponseError) as e:
+            client.execute_command('JSON.MSET',
+                                  dk, '$', '[1,2,3]',
+                                  dk, '.a', '99',
+                                  k, '.v', '42')
+        assert self.error_class.is_write_error(str(e.value))
+        assert client.execute_command('PING')
+        # Op1 applied
+        assert b'[1,2,3]' == client.execute_command('JSON.GET', dk, '.')
+        # Op3 NOT applied (fail-fast stopped at op2)
+        assert b'{"v":0}' == client.execute_command('JSON.GET', k, '.')
+
     def test_multi_exec(self):
         client = self.server.get_new_client()
         client.execute_command('MULTI')
